@@ -7,7 +7,7 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 const usageDb = require('./db');
 
 const app = express();
-const PORT = 7940;
+const PORT = Number(process.env.PORT || 7940);
 const DEV_MODE = process.env.NODE_ENV !== 'production' && !fs.existsSync(path.join(__dirname, 'dist', 'index.html'));
 
 // usage 实时更新推送（SSE）
@@ -147,6 +147,20 @@ app.post('/api/settings', (req, res) => {
   updateCliProxyVars();
   
   res.json({ success: true });
+});
+
+app.delete('/api/settings', (req, res) => {
+  try {
+    if (fs.existsSync(SETTINGS_FILE)) {
+      fs.unlinkSync(SETTINGS_FILE);
+    }
+    CLI_PROXY_API = '';
+    CLI_PROXY_KEY = '';
+    res.json({ success: true });
+  } catch (e) {
+    console.error('删除设置失败:', e);
+    res.status(500).json({ error: '删除设置失败' });
+  }
 });
 
 function getTodayDate() {
@@ -711,15 +725,20 @@ app.get('/api/usage/history', (req, res) => {
 });
 
 app.post('/api/usage/export-now', async (req, res) => {
-  await autoExportUsage();
-  const syncState = usageDb.getSyncState();
-  const usage = usageDb.getUsageStats();
-  broadcastUsageUpdate({ manual: true });
-  res.json({ 
-    success: true, 
-    lastExport: syncState?.last_sync,
-    usage: usage
-  });
+  try {
+    await autoExportUsage();
+    const syncState = usageDb.getSyncState();
+    const usage = usageDb.getUsageStats();
+    broadcastUsageUpdate({ manual: true });
+    res.json({ 
+      success: true, 
+      lastExport: syncState?.last_sync,
+      usage: usage
+    });
+  } catch (e) {
+    console.error('手动同步失败:', e);
+    res.status(500).json({ error: e?.message || '手动同步失败' });
+  }
 });
 
 // OpenAI 兼容提供商管理 API（代理到 CLI-Proxy）

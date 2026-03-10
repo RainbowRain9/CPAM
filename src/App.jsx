@@ -24,6 +24,9 @@ function App({ openCodeEnabled }) {
   const [openaiProviders, setOpenaiProviders] = useState([])
   const [editingProvider, setEditingProvider] = useState(null)
   const [providerForm, setProviderForm] = useState({ name: '', baseUrl: '', apiKeys: '', models: '' })
+  const [syncing, setSyncing] = useState(false)
+  const [syncMessage, setSyncMessage] = useState('')
+  const [syncError, setSyncError] = useState('')
 
   const MODEL_COLORS = [
     '#0d0d0d', '#10a37f', '#ef4444', '#3b82f6', '#f59e0b', 
@@ -73,6 +76,27 @@ function App({ openCodeEnabled }) {
       es.close()
     }
   }, [])
+
+  const handleManualSync = async () => {
+    setSyncing(true)
+    setSyncError('')
+    setSyncMessage('')
+    try {
+      const res = await fetch('/api/usage/export-now', { method: 'POST' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new Error(data.error || `手动同步失败：${res.status}`)
+      }
+      if (data.usage) setUsage(data.usage)
+      if (data.lastExport) setLastExport(data.lastExport)
+      setSyncMessage('手动同步成功')
+      fetchUsage()
+    } catch (e) {
+      setSyncError(e.message || '手动同步失败')
+    } finally {
+      setSyncing(false)
+    }
+  }
 
   const formatNumber = (num) => {
     if (!num) return '0'
@@ -401,10 +425,28 @@ function App({ openCodeEnabled }) {
 
         {/* 头部区域 */}
         <div className="mb-10">
-          <h1 className="text-3xl font-semibold text-[#0d0d0d] mb-2">使用统计</h1>
-          <p className="text-[#6e6e80]">
-            CLI Proxy API 使用记录 · 最后更新: {formatTime(lastExport)}
-          </p>
+          <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+            <div>
+              <h1 className="text-3xl font-semibold text-[#0d0d0d] mb-2">使用统计</h1>
+              <p className="text-[#6e6e80]">
+                CLI Proxy API 使用记录 · 最后更新: {formatTime(lastExport)}
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleManualSync}
+                disabled={syncing}
+                className="px-4 py-2 text-sm font-medium text-white bg-[#0d0d0d] rounded-lg hover:bg-[#2d2d2d] disabled:opacity-50 transition-colors inline-flex items-center gap-2"
+              >
+                <svg className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                </svg>
+                {syncing ? '同步中...' : '手动同步'}
+              </button>
+            </div>
+          </div>
+          {syncMessage && <p className="text-sm text-[#10a37f] mt-3">{syncMessage}</p>}
+          {syncError && <p className="text-sm text-[#ef4444] mt-3">{syncError}</p>}
         </div>
 
         {/* 加载状态 */}

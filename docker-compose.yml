@@ -1,0 +1,16 @@
+services:
+  cli-proxy-api-center:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: cli-proxy-api-center
+    ports:
+      - "7940:7940"
+    environment:
+      NODE_ENV: production
+      PORT: 7940
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

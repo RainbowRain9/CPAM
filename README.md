@@ -34,6 +34,27 @@ API Center 通过定时从 CLI-Proxy 的 export API 同步数据并存入本地 
 npm install
 ```
 
+### 本地部署（推荐）
+
+如果你的 CLI-Proxy 就跑在当前机器上，优先使用本地部署，最省事：
+
+```bash
+npm run build
+npm start
+```
+
+访问：
+
+```text
+http://localhost:7940
+```
+
+页面里将 CLI-Proxy 地址填写为：
+
+```text
+http://localhost:8317
+```
+
 ### 开发模式
 
 ```bash
@@ -60,3 +81,48 @@ npm start
 - **OpenCode 配置目录**（可选）— 例如 `C:\Users\你的用户名\.config\opencode`，配置后主页会显示 OpenCode 管理入口
 
 配置完成后即可开始使用各项功能。
+
+## Docker 部署
+
+> 如果 CLI-Proxy 与本项目部署在同一台机器上，优先推荐上面的“本地部署（推荐）”。Docker 更适合把 API Center 单独封装运行的场景。
+
+### 直接使用 Docker
+
+```bash
+docker build -t cli-proxy-api-center .
+docker run -d \
+  --name cli-proxy-api-center \
+  -p 7940:7940 \
+  -e NODE_ENV=production \
+  -e PORT=7940 \
+  -v $(pwd)/data:/app/data \
+  cli-proxy-api-center
+```
+
+### 使用 Docker Compose
+
+```bash
+docker compose up -d --build
+```
+
+启动后访问：
+
+```text
+http://localhost:7940
+```
+
+### 持久化说明
+
+项目使用 SQLite + JSON 文件保存数据，容器内统一写入 `/app/data`。
+因此部署时建议挂载：
+
+- 本地 `./data`
+- 容器 `/app/data`
+
+否则删除容器后，历史统计、设置、签到状态等数据会丢失。
+
+### 说明
+
+- Docker 镜像会先执行 `vite build` 构建前端
+- 生产环境由 `node server.js` 提供后端接口和 `dist/` 静态页面
+- 镜像基于 Debian slim，兼容 `better-sqlite3` 原生模块更稳

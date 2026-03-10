@@ -55,6 +55,31 @@ http://localhost:7940
 http://localhost:8317
 ```
 
+### 本地部署 + systemd 开机自启（推荐生产用法）
+
+仓库已内置：
+
+- 启动脚本：`scripts/start-local.sh`
+- systemd service：`deploy/systemd/api-center.service`
+- 安装脚本：`scripts/install-systemd.sh`
+
+安装方式：
+
+```bash
+cd ~/Code/cli-proxy-API-Center
+chmod +x scripts/*.sh
+./scripts/install-systemd.sh
+```
+
+常用命令：
+
+```bash
+systemctl status api-center
+systemctl restart api-center
+systemctl stop api-center
+journalctl -u api-center -f
+```
+
 ### 开发模式
 
 ```bash

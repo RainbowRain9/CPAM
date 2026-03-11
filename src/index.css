@@ -286,64 +286,93 @@ textarea::placeholder {
     box-shadow 180ms ease;
 }
 
-html[data-theme="dark"] .legacy-surface [class*="bg-white"] {
+.legacy-surface [class*="bg-white"] {
   background: var(--bg-card-strong) !important;
 }
 
-html[data-theme="dark"] .legacy-surface [class*="bg-[#fafafa]"],
-html[data-theme="dark"] .legacy-surface [class*="bg-[#f7f7f8]"],
-html[data-theme="dark"] .legacy-surface [class*="bg-[#f0f0f0]"] {
+.legacy-surface [class*="bg-[#fafafa]"],
+.legacy-surface [class*="bg-[#f7f7f8]"],
+.legacy-surface [class*="bg-[#f0f0f0]"] {
   background: var(--bg-secondary) !important;
 }
 
-html[data-theme="dark"] .legacy-surface [class*="text-[#0d0d0d]"] {
+.legacy-surface [class*="text-[#0d0d0d]"] {
   color: var(--text-primary) !important;
 }
 
-html[data-theme="dark"] .legacy-surface [class*="text-[#6e6e80]"],
-html[data-theme="dark"] .legacy-surface [class*="text-[#8e8ea0]"],
-html[data-theme="dark"] .legacy-surface [class*="text-[#acacac]"],
-html[data-theme="dark"] .legacy-surface [class*="text-[#94a3b8]"] {
+.legacy-surface [class*="text-[#6e6e80]"],
+.legacy-surface [class*="text-[#8e8ea0]"],
+.legacy-surface [class*="text-[#acacac]"],
+.legacy-surface [class*="text-[#94a3b8]"] {
   color: var(--text-secondary) !important;
 }
 
-html[data-theme="dark"] .legacy-surface [class*="border-[#e5e5e5]"],
-html[data-theme="dark"] .legacy-surface [class*="border-[#ececec]"],
-html[data-theme="dark"] .legacy-surface [class*="border-[#e2e8f0]"] {
+.legacy-surface [class*="border-[#e5e5e5]"],
+.legacy-surface [class*="border-[#ececec]"],
+.legacy-surface [class*="border-[#e2e8f0]"] {
   border-color: var(--border-color) !important;
 }
 
-html[data-theme="dark"] .legacy-surface [class*="hover:bg-[#f7f7f8]"]:hover,
-html[data-theme="dark"] .legacy-surface [class*="hover:bg-[#f0f0f0]"]:hover,
-html[data-theme="dark"] .legacy-surface [class*="hover:bg-[#fafafa]"]:hover {
+.legacy-surface [class*="hover:bg-[#f7f7f8]"]:hover,
+.legacy-surface [class*="hover:bg-[#f0f0f0]"]:hover,
+.legacy-surface [class*="hover:bg-[#fafafa]"]:hover {
   background: var(--bg-hover) !important;
 }
 
-html[data-theme="dark"] .legacy-surface [class*="shadow-sm"],
-html[data-theme="dark"] .legacy-surface [class*="shadow-xl"] {
+.legacy-surface [class*="shadow-sm"],
+.legacy-surface [class*="shadow-xl"] {
   box-shadow: var(--shadow-panel) !important;
 }
 
-html[data-theme="dark"] .legacy-surface [class*="bg-[#fef2f2]"] {
+.legacy-surface [class*="bg-[#fef2f2]"] {
   background: color-mix(in srgb, var(--danger) 10%, var(--bg-card-strong)) !important;
+  border-color: color-mix(in srgb, var(--danger) 18%, transparent) !important;
 }
 
-html[data-theme="dark"] .legacy-surface [class*="bg-[#f0fdf4]"] {
+.legacy-surface [class*="bg-[#f0fdf4]"] {
   background: color-mix(in srgb, var(--success) 8%, var(--bg-card-strong)) !important;
+  border-color: color-mix(in srgb, var(--success) 18%, transparent) !important;
 }
 
-html[data-theme="dark"] .legacy-surface [class*="bg-[#fff7ed]"],
-html[data-theme="dark"] .legacy-surface [class*="bg-[#fffbeb]"] {
+.legacy-surface [class*="bg-[#fff7ed]"],
+.legacy-surface [class*="bg-[#fffbeb]"] {
   background: color-mix(in srgb, var(--warning) 10%, var(--bg-card-strong)) !important;
+  border-color: color-mix(in srgb, var(--warning) 18%, transparent) !important;
 }
 
-html[data-theme="dark"] .legacy-surface [class*="bg-[#eff6ff]"],
-html[data-theme="dark"] .legacy-surface [class*="bg-[#e3f2fd]"] {
+.legacy-surface [class*="bg-[#eff6ff]"],
+.legacy-surface [class*="bg-[#e3f2fd]"] {
   background: color-mix(in srgb, var(--info) 9%, var(--bg-card-strong)) !important;
+  border-color: color-mix(in srgb, var(--info) 18%, transparent) !important;
 }
 
-html[data-theme="dark"] .legacy-surface [class*="border-b"] {
+.legacy-surface [class*="border-b"] {
   border-color: var(--border-color);
+}
+
+.legacy-surface [class*="bg-black/30"],
+.legacy-surface [class*="bg-black/50"] {
+  background: var(--bg-overlay) !important;
+  backdrop-filter: blur(18px);
+}
+
+.legacy-surface input:not([type="range"]):not([type="checkbox"]):not([type="radio"]),
+.legacy-surface textarea,
+.legacy-surface select {
+  background: var(--bg-input) !important;
+  color: var(--text-primary) !important;
+  border-color: var(--border-color) !important;
+}
+
+.legacy-surface input[type="checkbox"],
+.legacy-surface input[type="radio"] {
+  accent-color: var(--text-primary);
+}
+
+.legacy-surface [class*="focus:border-[#0d0d0d]"]:focus,
+.legacy-surface [class*="focus:ring-[#0d0d0d]"]:focus {
+  border-color: var(--border-strong) !important;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 @media (max-width: 768px) {

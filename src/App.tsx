@@ -12,6 +12,7 @@ import { apiFetch, createApiEventSource } from './auth.js'
 import { ActionButton, AppShell, PageHero, InlineIcon } from './components/ui'
 import { useI18n } from './i18n/useI18n'
 import { buildPrimaryNav } from './navigation'
+import { useTheme } from './theme/useTheme'
 
 const DEFAULT_REQUESTS_PER_PAGE = 10
 const REQUESTS_PER_PAGE_OPTIONS = [10, 20, 50, 100]
@@ -761,10 +762,10 @@ function TabButton({ active, onClick, children }) {
   return (
     <button
       onClick={onClick}
-      className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+      className={`px-4 py-2 text-sm font-medium rounded-xl transition-colors ${
         active
-          ? 'bg-white text-[#0d0d0d] shadow-sm'
-          : 'text-[#6e6e80] hover:text-[#0d0d0d]'
+          ? 'border border-[var(--border-color)] bg-[var(--bg-card-strong)] text-[var(--text-primary)] shadow-[var(--shadow-soft)]'
+          : 'text-[var(--text-secondary)] hover:bg-[var(--bg-hover)] hover:text-[var(--text-primary)]'
       }`}
     >
       {children}
@@ -774,10 +775,10 @@ function TabButton({ active, onClick, children }) {
 
 function OverviewCard({ title, value, meta = null, valueClassName = 'text-[#0d0d0d]' }) {
   return (
-    <div className="p-6 border border-[#e5e5e5] rounded-xl">
-      <p className="text-sm text-[#6e6e80] mb-1">{title}</p>
+    <div className="surface-panel-subtle rounded-[24px] border p-6">
+      <p className="mb-1 text-sm text-[var(--text-secondary)]">{title}</p>
       <p className={`text-3xl font-semibold ${valueClassName}`}>{value}</p>
-      {meta && <div className="mt-3 text-xs text-[#6e6e80] space-y-1">{meta}</div>}
+      {meta && <div className="mt-3 space-y-1 text-xs text-[var(--text-secondary)]">{meta}</div>}
     </div>
   )
 }
@@ -785,6 +786,7 @@ function OverviewCard({ title, value, meta = null, valueClassName = 'text-[#0d0d
 function App({ openCodeEnabled }) {
   const pricingSeededRef = useRef(Object.keys(INITIAL_LOCAL_MODEL_PRICING).length > 0)
   const { t } = useI18n()
+  const { resolvedTheme } = useTheme()
 
   const [usage, setUsage] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -806,6 +808,25 @@ function App({ openCodeEnabled }) {
   const [syncMessage, setSyncMessage] = useState('')
   const [syncError, setSyncError] = useState('')
   const navItems = useMemo(() => buildPrimaryNav(t, openCodeEnabled), [openCodeEnabled, t])
+  const chartTheme = useMemo(() => (
+    resolvedTheme === 'dark'
+      ? {
+          grid: 'rgba(255,255,255,0.11)',
+          axis: 'rgba(255,255,255,0.68)',
+          tooltipBg: 'rgba(10,10,10,0.92)',
+          tooltipBorder: 'rgba(255,255,255,0.12)',
+          requestLine: '#f8f8f4',
+          tokenLine: '#93c5fd',
+        }
+      : {
+          grid: 'rgba(17,17,17,0.08)',
+          axis: 'rgba(17,17,17,0.58)',
+          tooltipBg: 'rgba(255,255,255,0.94)',
+          tooltipBorder: 'rgba(17,17,17,0.08)',
+          requestLine: '#121212',
+          tokenLine: '#0f766e',
+        }
+  ), [resolvedTheme])
 
   const fetchUsage = async () => {
     try {
@@ -1054,10 +1075,10 @@ function App({ openCodeEnabled }) {
             </div>
 
             <div className="grid gap-6 lg:grid-cols-2 mb-8">
-              <div className="border border-[#e5e5e5] rounded-xl p-6">
+              <div className="surface-panel rounded-[24px] p-6">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-base font-semibold text-[#0d0d0d]">请求趋势</h3>
-                  <div className="flex gap-1 p-0.5 bg-[#f7f7f8] rounded-md">
+                  <div className="flex gap-1 rounded-xl bg-[var(--bg-secondary)] p-0.5">
                     <button
                       onClick={() => setRequestChartMode('hourly')}
                       className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
@@ -1079,23 +1100,29 @@ function App({ openCodeEnabled }) {
                 <div className="h-64">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={requestChartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e5e5" />
-                      <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="#6e6e80" />
-                      <YAxis tick={{ fontSize: 10 }} stroke="#6e6e80" width={40} />
+                      <CartesianGrid strokeDasharray="3 3" stroke={chartTheme.grid} />
+                      <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke={chartTheme.axis} />
+                      <YAxis tick={{ fontSize: 10 }} stroke={chartTheme.axis} width={40} />
                       <Tooltip
-                        contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e5e5e5' }}
+                        contentStyle={{
+                          fontSize: 12,
+                          borderRadius: 12,
+                          border: `1px solid ${chartTheme.tooltipBorder}`,
+                          backgroundColor: chartTheme.tooltipBg,
+                          color: resolvedTheme === 'dark' ? '#f8f8f4' : '#121212',
+                        }}
                         formatter={(value) => [formatNumber(value), '请求数']}
                       />
-                      <Line type="monotone" dataKey="requests" stroke="#0d0d0d" strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="requests" stroke={chartTheme.requestLine} strokeWidth={2.2} dot={false} />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
               </div>
 
-              <div className="border border-[#e5e5e5] rounded-xl p-6">
+              <div className="surface-panel rounded-[24px] p-6">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-base font-semibold text-[#0d0d0d]">Token 趋势</h3>
-                  <div className="flex gap-1 p-0.5 bg-[#f7f7f8] rounded-md">
+                  <div className="flex gap-1 rounded-xl bg-[var(--bg-secondary)] p-0.5">
                     <button
                       onClick={() => setTokenChartMode('hourly')}
                       className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
@@ -1117,26 +1144,32 @@ function App({ openCodeEnabled }) {
                 <div className="h-64">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={tokenChartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                      <CartesianGrid strokeDasharray="3 3" stroke="#e5e5e5" />
-                      <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="#6e6e80" />
+                      <CartesianGrid strokeDasharray="3 3" stroke={chartTheme.grid} />
+                      <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke={chartTheme.axis} />
                       <YAxis
                         tick={{ fontSize: 10 }}
-                        stroke="#6e6e80"
+                        stroke={chartTheme.axis}
                         width={45}
                         tickFormatter={(value) => formatTokens(value)}
                       />
                       <Tooltip
-                        contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e5e5e5' }}
+                        contentStyle={{
+                          fontSize: 12,
+                          borderRadius: 12,
+                          border: `1px solid ${chartTheme.tooltipBorder}`,
+                          backgroundColor: chartTheme.tooltipBg,
+                          color: resolvedTheme === 'dark' ? '#f8f8f4' : '#121212',
+                        }}
                         formatter={(value) => [formatTokens(value), 'Tokens']}
                       />
-                      <Line type="monotone" dataKey="totalTokens" stroke="#10a37f" strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="totalTokens" stroke={chartTheme.tokenLine} strokeWidth={2.2} dot={false} />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
               </div>
             </div>
 
-            <div className="border border-[#e5e5e5] rounded-xl p-6 mb-8">
+            <div className="surface-panel rounded-[24px] p-6 mb-8">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between mb-5">
                 <div>
                   <h3 className="text-base font-semibold text-[#0d0d0d]">服务健康监测</h3>
@@ -1185,10 +1218,10 @@ function App({ openCodeEnabled }) {
                             <div
                               key={block.key}
                               title={block.title}
-                              className={`h-2.5 rounded-[3px] transition-transform duration-150 hover:scale-y-125 ${
+                              className={`aspect-square w-full rounded-[3px] transition-transform duration-150 hover:scale-110 ${
                                 block.total === 0 ? 'border border-[#e2e8f0]' : ''
                               }`}
-                              style={{ backgroundColor: block.color }}
+                              style={{ backgroundColor: block.total === 0 ? 'transparent' : block.color }}
                             />
                           ))}
                         </div>

@@ -112,8 +112,8 @@ export function ParticleCanvas({
 
     const resize = () => {
       const parent = canvas.parentElement
-      const width = parent?.clientWidth || window.innerWidth
-      const height = parent?.clientHeight || window.innerHeight
+      const width = Math.max(parent?.clientWidth || 0, window.innerWidth)
+      const height = Math.max(parent?.clientHeight || 0, window.innerHeight)
       const dpr = window.devicePixelRatio || 1
       canvas.width = width * dpr
       canvas.height = height * dpr
@@ -121,8 +121,8 @@ export function ParticleCanvas({
       canvas.style.height = `${height}px`
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
-      const particleCount = Math.round((width * height) / 23000 * density * config.densityScale * (subdued ? 0.55 : 1))
-      particlesRef.current = Array.from({ length: Math.max(18, Math.min(90, particleCount)) }, () => new Particle(width, height))
+      const particleCount = Math.round((width * height) / 15000 * density * config.densityScale * (subdued ? 0.78 : 1))
+      particlesRef.current = Array.from({ length: Math.max(26, Math.min(140, particleCount)) }, () => new Particle(width, height))
     }
 
     const render = () => {

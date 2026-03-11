@@ -8,7 +8,7 @@ const usageDb = require('./db');
 
 const app = express();
 const PORT = Number(process.env.PORT || 7940);
-const DEV_MODE = process.env.NODE_ENV !== 'production' && !fs.existsSync(path.join(__dirname, 'dist', 'index.html'));
+const DEV_MODE = process.env.NODE_ENV !== 'production' && !fs.existsSync(path.join(__dirname, '..', 'dist', 'index.html'));
 
 // usage 实时更新推送（SSE）
 const usageStreamClients = new Set();
@@ -24,7 +24,7 @@ function broadcastUsageUpdate(payload = {}) {
   }
 }
 
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = path.join(__dirname, '..', 'data');
 const STATUS_FILE = path.join(DATA_DIR, 'checkin-status.json');
 const SITES_FILE = path.join(DATA_DIR, 'managed-sites.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
@@ -77,7 +77,7 @@ function getSyncInterval() {
 
 app.use(cors());
 app.use(express.json());
-app.use(express.static(path.join(__dirname, 'dist')));
+app.use(express.static(path.join(__dirname, '..', 'dist')));
 
 app.get('/api/usage/stream', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -1242,7 +1242,7 @@ if (DEV_MODE) {
 } else {
   // 生产模式：提供静态文件
   app.get('*', (req, res) => {
-    res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+    res.sendFile(path.join(__dirname, '..', 'dist', 'index.html'));
   });
 }
 

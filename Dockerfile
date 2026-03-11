@@ -19,12 +19,12 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 COPY --from=builder /app/dist ./dist
-COPY --from=builder /app/server.js ./server.js
-COPY --from=builder /app/db.js ./db.js
+COPY --from=builder /app/server/server.js ./server/server.js
+COPY --from=builder /app/server/db.js ./server/db.js
 
 RUN mkdir -p /app/data
 
 VOLUME ["/app/data"]
 EXPOSE 7940
 
-CMD ["node", "server.js"]
+CMD ["node", "server/server.js"]

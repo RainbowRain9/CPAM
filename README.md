@@ -149,5 +149,5 @@ http://localhost:7940
 ### 说明
 
 - Docker 镜像会先执行 `vite build` 构建前端
-- 生产环境由 `node server.js` 提供后端接口和 `dist/` 静态页面
+- 生产环境由 `node server/server.js` 提供后端接口和 `dist/` 静态页面
 - 镜像基于 Debian slim，兼容 `better-sqlite3` 原生模块更稳

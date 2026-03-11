@@ -2,13 +2,13 @@
   "name": "api-site-manager",
   "version": "1.0.0",
   "description": "API公益站点签到管理工具",
-  "main": "server.js",
+  "main": "server/server.js",
   "scripts": {
     "dev": "concurrently \"npm run server\" \"npm run client\"",
-    "server": "node server.js",
+    "server": "node server/server.js",
     "client": "vite",
     "build": "vite build",
-    "start": "node server.js"
+    "start": "node server/server.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.6.2",

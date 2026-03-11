@@ -2,7 +2,6 @@ const express = require('express');
 const cors = require('cors');
 const fs = require('fs');
 const path = require('path');
-const yaml = require('yaml');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const usageDb = require('./db');
 
@@ -25,8 +24,6 @@ function broadcastUsageUpdate(payload = {}) {
 }
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
-const STATUS_FILE = path.join(DATA_DIR, 'checkin-status.json');
-const SITES_FILE = path.join(DATA_DIR, 'managed-sites.json');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 
 // 加载/保存设置
@@ -163,44 +160,6 @@ app.delete('/api/settings', (req, res) => {
   }
 });
 
-function getTodayDate() {
-  return new Date().toISOString().split('T')[0];
-}
-
-function loadStatus() {
-  try {
-    if (fs.existsSync(STATUS_FILE)) {
-      const data = JSON.parse(fs.readFileSync(STATUS_FILE, 'utf-8'));
-      if (data.date !== getTodayDate()) {
-        return { date: getTodayDate(), checkins: {} };
-      }
-      return data;
-    }
-  } catch (e) {
-    console.error('Error loading status:', e);
-  }
-  return { date: getTodayDate(), checkins: {} };
-}
-
-function saveStatus(status) {
-  fs.writeFileSync(STATUS_FILE, JSON.stringify(status, null, 2));
-}
-
-function loadManagedSites() {
-  try {
-    if (fs.existsSync(SITES_FILE)) {
-      return JSON.parse(fs.readFileSync(SITES_FILE, 'utf-8'));
-    }
-  } catch (e) {
-    console.error('Error loading managed sites:', e);
-  }
-  return [];
-}
-
-function saveManagedSites(sites) {
-  fs.writeFileSync(SITES_FILE, JSON.stringify(sites, null, 2));
-}
-
 // 从API构建 source -> provider 映射（仅API Key）
 async function buildSourceProviderMap() {
   const map = {};
@@ -324,6 +283,12 @@ async function updateKeyProviderCacheFromUsage(usage) {
 }
 
 async function exportUsageFromCliProxy() {
+  // 检查 CLI-Proxy 是否已配置
+  if (!CLI_PROXY_API) {
+    console.log('[Usage] CLI-Proxy 未配置，跳过同步（请在 Web 界面配置后自动启用）');
+    return null;
+  }
+  
   try {
     const response = await fetch(`${CLI_PROXY_API}/usage/export`, {
       headers: { 'Authorization': `Bearer ${CLI_PROXY_KEY}` }
@@ -337,7 +302,7 @@ async function exportUsageFromCliProxy() {
     const data = await response.json();
     return data;
   } catch (e) {
-    console.error('Error exporting usage from cli-proxy:', e);
+    console.error('[Usage] 同步失败:', e.message || e);
     return null;
   }
 }
@@ -386,29 +351,31 @@ function extractUsageRecords(usage) {
 }
 
 async function autoExportUsage() {
-  console.log('[Usage] 开始自动同步使用记录...');
   const exportData = await exportUsageFromCliProxy();
   
-  if (exportData && exportData.usage) {
-    // 提取记录并增量插入数据库
-    const records = extractUsageRecords(exportData.usage);
-    
-    if (records.length > 0) {
-      const inserted = usageDb.insertUsageBatch(records);
-      console.log(`[Usage] 插入 ${inserted} 条新记录（总共 ${records.length} 条）`);
-    }
-    
-    // 更新同步状态
-    usageDb.updateSyncState(new Date().toISOString(), exportData.exported_at);
-    
-    // 更新 key-provider 缓存
-    await updateKeyProviderCacheFromUsage(exportData.usage);
-
-    // 通知前端有新数据（无需手动刷新）
-    broadcastUsageUpdate({ inserted: records.length });
-    
-    console.log('[Usage] 同步完成');
+  // 如果未配置或同步失败，静默返回
+  if (!exportData || !exportData.usage) {
+    return;
   }
+  
+  // 提取记录并增量插入数据库
+  const records = extractUsageRecords(exportData.usage);
+  
+  if (records.length > 0) {
+    const inserted = usageDb.insertUsageBatch(records);
+    console.log(`[Usage] 插入 ${inserted} 条新记录（总共 ${records.length} 条）`);
+  }
+  
+  // 更新同步状态
+  usageDb.updateSyncState(new Date().toISOString(), exportData.exported_at);
+  
+  // 更新 key-provider 缓存
+  await updateKeyProviderCacheFromUsage(exportData.usage);
+
+  // 通知前端有新数据（无需手动刷新）
+  broadcastUsageUpdate({ inserted: records.length });
+  
+  console.log('[Usage] 同步完成');
 }
 
 // 启动定时同步
@@ -427,260 +394,13 @@ function startUsageExportScheduler() {
   scheduleNext();
   
   const interval = getSyncInterval();
-  console.log(`[Usage] 定时同步已启动，间隔: ${interval / 1000}秒`);
-}
-
-async function loadConfigSites() {
-  try {
-    const response = await fetch(`${CLI_PROXY_API}/openai-compatibility`, {
-      headers: { 'Authorization': `Bearer ${CLI_PROXY_KEY}` }
-    });
-    if (!response.ok) {
-      console.error('Failed to fetch config sites:', response.status);
-      return [];
-    }
-    const data = await response.json();
-    const sites = data['openai-compatibility'] || data.items || data.data || data || [];
-    return (Array.isArray(sites) ? sites : []).map(site => ({
-      name: site.name,
-      baseUrl: site['base-url']
-    }));
-  } catch (e) {
-    console.error('Error loading sites from API:', e);
-    return [];
+  const config = getCliProxyConfig();
+  if (config && config.baseUrl) {
+    console.log(`[Usage] 定时同步已启动，间隔: ${interval / 1000}秒，目标: ${config.baseUrl}`);
+  } else {
+    console.log(`[Usage] 定时同步已就绪（间隔: ${interval / 1000}秒），等待 CLI-Proxy 配置...`);
   }
 }
-
-app.get('/api/sites', (req, res) => {
-  const sites = loadManagedSites();
-  const status = loadStatus();
-  const result = sites.map(site => ({
-    ...site,
-    checkedIn: !!status.checkins[site.name]
-  }));
-  res.json(result);
-});
-
-app.get('/api/config-sites', async (req, res) => {
-  const configSites = await loadConfigSites();
-  const managedSites = loadManagedSites();
-  const managedNames = new Set(managedSites.map(s => s.name));
-  const result = configSites.map(site => ({
-    ...site,
-    added: managedNames.has(site.name)
-  }));
-  res.json(result);
-});
-
-app.post('/api/sites', (req, res) => {
-  const { name, directUrl } = req.body;
-  if (!name) {
-    return res.status(400).json({ error: '站点名称不能为空' });
-  }
-  const configSites = loadConfigSites();
-  const configSite = configSites.find(s => s.name === name);
-  if (!configSite) {
-    return res.status(400).json({ error: '站点不在配置文件中' });
-  }
-  const sites = loadManagedSites();
-  if (sites.some(s => s.name === name)) {
-    return res.status(400).json({ error: '站点已存在' });
-  }
-  sites.push({ name, baseUrl: configSite.baseUrl, directUrl: directUrl || '' });
-  saveManagedSites(sites);
-  res.json({ success: true, site: { name, baseUrl: configSite.baseUrl, directUrl } });
-});
-
-app.patch('/api/sites/:siteName', (req, res) => {
-  const { siteName } = req.params;
-  const { directUrl } = req.body;
-  const sites = loadManagedSites();
-  const site = sites.find(s => s.name === siteName);
-  if (!site) {
-    return res.status(404).json({ error: '站点不存在' });
-  }
-  site.directUrl = directUrl || '';
-  saveManagedSites(sites);
-  res.json({ success: true, site });
-});
-
-app.delete('/api/sites/:siteName', (req, res) => {
-  const { siteName } = req.params;
-  let sites = loadManagedSites();
-  sites = sites.filter(s => s.name !== siteName);
-  saveManagedSites(sites);
-  const status = loadStatus();
-  delete status.checkins[siteName];
-  saveStatus(status);
-  res.json({ success: true });
-});
-
-app.get('/api/status', (req, res) => {
-  const status = loadStatus();
-  res.json(status);
-});
-
-app.post('/api/checkin/:siteName', (req, res) => {
-  const { siteName } = req.params;
-  const status = loadStatus();
-  status.checkins[siteName] = {
-    time: new Date().toISOString(),
-    done: true
-  };
-  saveStatus(status);
-  res.json({ success: true, siteName, checkedIn: true });
-});
-
-app.delete('/api/checkin/:siteName', (req, res) => {
-  const { siteName } = req.params;
-  const status = loadStatus();
-  delete status.checkins[siteName];
-  saveStatus(status);
-  res.json({ success: true, siteName, checkedIn: false });
-});
-
-// 站点配置管理 API（通过 CLI-Proxy API 方式，实时生效无需重启）
-app.get('/api/config/sites', async (req, res) => {
-  try {
-    const response = await fetch(`${CLI_PROXY_API}/openai-compatibility`, {
-      headers: { 'Authorization': `Bearer ${CLI_PROXY_KEY}` }
-    });
-    if (!response.ok) {
-      return res.status(response.status).json({ error: '获取站点列表失败' });
-    }
-    const data = await response.json();
-    const sites = data['openai-compatibility'] || data.items || data.data || data || [];
-    res.json(Array.isArray(sites) ? sites : []);
-  } catch (e) {
-    console.error('Error reading config via API:', e);
-    res.status(500).json({ error: '读取配置失败: ' + e.message });
-  }
-});
-
-app.post('/api/config/sites', async (req, res) => {
-  try {
-    const newSite = req.body;
-    if (!newSite.name || !newSite['base-url']) {
-      return res.status(400).json({ error: '站点名称和地址不能为空' });
-    }
-    
-    // 先获取现有列表
-    const getRes = await fetch(`${CLI_PROXY_API}/openai-compatibility`, {
-      headers: { 'Authorization': `Bearer ${CLI_PROXY_KEY}` }
-    });
-    if (!getRes.ok) {
-      return res.status(getRes.status).json({ error: '获取站点列表失败' });
-    }
-    const data = await getRes.json();
-    const sites = data['openai-compatibility'] || data.items || data.data || data || [];
-    const siteList = Array.isArray(sites) ? sites : [];
-    
-    if (siteList.some(s => s.name === newSite.name)) {
-      return res.status(400).json({ error: '站点名称已存在' });
-    }
-    
-    const siteEntry = {
-      name: newSite.name,
-      'base-url': newSite['base-url'],
-      'api-key-entries': newSite['api-key-entries'] || [{ 'api-key': '' }],
-      models: newSite.models || []
-    };
-    
-    siteList.push(siteEntry);
-    
-    // 保存整个列表
-    const putRes = await fetch(`${CLI_PROXY_API}/openai-compatibility`, {
-      method: 'PUT',
-      headers: { 
-        'Authorization': `Bearer ${CLI_PROXY_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(siteList)
-    });
-    
-    if (!putRes.ok) {
-      const text = await putRes.text();
-      return res.status(putRes.status).json({ error: text || '添加站点失败' });
-    }
-    
-    res.json({ success: true, site: siteEntry });
-  } catch (e) {
-    console.error('Error adding site via API:', e);
-    res.status(500).json({ error: '添加站点失败: ' + e.message });
-  }
-});
-
-app.put('/api/config/sites/:siteName', async (req, res) => {
-  try {
-    const { siteName } = req.params;
-    const updates = req.body;
-    
-    // 先获取现有列表
-    const getRes = await fetch(`${CLI_PROXY_API}/openai-compatibility`, {
-      headers: { 'Authorization': `Bearer ${CLI_PROXY_KEY}` }
-    });
-    if (!getRes.ok) {
-      return res.status(getRes.status).json({ error: '获取站点列表失败' });
-    }
-    const data = await getRes.json();
-    const sites = data['openai-compatibility'] || data.items || data.data || data || [];
-    const siteList = Array.isArray(sites) ? sites : [];
-    
-    const siteIndex = siteList.findIndex(s => s.name === siteName);
-    if (siteIndex === -1) {
-      return res.status(404).json({ error: '站点不存在' });
-    }
-    
-    const site = siteList[siteIndex];
-    
-    if (updates.name !== undefined) site.name = updates.name;
-    if (updates['base-url'] !== undefined) site['base-url'] = updates['base-url'];
-    if (updates['api-key-entries'] !== undefined) site['api-key-entries'] = updates['api-key-entries'];
-    if (updates.models !== undefined) site.models = updates.models;
-    
-    // 保存整个列表
-    const putRes = await fetch(`${CLI_PROXY_API}/openai-compatibility`, {
-      method: 'PUT',
-      headers: { 
-        'Authorization': `Bearer ${CLI_PROXY_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(siteList)
-    });
-    
-    if (!putRes.ok) {
-      const text = await putRes.text();
-      return res.status(putRes.status).json({ error: text || '更新站点失败' });
-    }
-    
-    res.json({ success: true, site });
-  } catch (e) {
-    console.error('Error updating site via API:', e);
-    res.status(500).json({ error: '更新站点失败: ' + e.message });
-  }
-});
-
-app.delete('/api/config/sites/:siteName', async (req, res) => {
-  try {
-    const { siteName } = req.params;
-    
-    // 使用 CLI-Proxy 的删除 API
-    const delRes = await fetch(`${CLI_PROXY_API}/openai-compatibility?name=${encodeURIComponent(siteName)}`, {
-      method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${CLI_PROXY_KEY}` }
-    });
-    
-    if (!delRes.ok) {
-      const text = await delRes.text();
-      return res.status(delRes.status).json({ error: text || '删除站点失败' });
-    }
-    
-    res.json({ success: true });
-  } catch (e) {
-    console.error('Error deleting site via API:', e);
-    res.status(500).json({ error: '删除站点失败: ' + e.message });
-  }
-});
 
 // 模型计费 API
 app.get('/api/pricing', (req, res) => {
@@ -738,85 +458,6 @@ app.post('/api/usage/export-now', async (req, res) => {
   } catch (e) {
     console.error('手动同步失败:', e);
     res.status(500).json({ error: e?.message || '手动同步失败' });
-  }
-});
-
-// OpenAI 兼容提供商管理 API（代理到 CLI-Proxy）
-app.get('/api/openai-providers', async (req, res) => {
-  try {
-    const response = await fetch(`${CLI_PROXY_API}/openai-compatibility`, {
-      headers: { 'Authorization': `Bearer ${CLI_PROXY_KEY}` }
-    });
-    if (!response.ok) {
-      return res.status(response.status).json({ error: '获取提供商列表失败' });
-    }
-    const data = await response.json();
-    const list = data['openai-compatibility'] || data.items || data.data || data || [];
-    res.json(Array.isArray(list) ? list : []);
-  } catch (e) {
-    console.error('获取OpenAI提供商失败:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.put('/api/openai-providers', async (req, res) => {
-  try {
-    const response = await fetch(`${CLI_PROXY_API}/openai-compatibility`, {
-      method: 'PUT',
-      headers: { 
-        'Authorization': `Bearer ${CLI_PROXY_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(req.body)
-    });
-    if (!response.ok) {
-      const text = await response.text();
-      return res.status(response.status).json({ error: text || '保存失败' });
-    }
-    res.json({ success: true });
-  } catch (e) {
-    console.error('保存OpenAI提供商失败:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.patch('/api/openai-providers', async (req, res) => {
-  try {
-    const { index, value } = req.body;
-    const response = await fetch(`${CLI_PROXY_API}/openai-compatibility`, {
-      method: 'PATCH',
-      headers: { 
-        'Authorization': `Bearer ${CLI_PROXY_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify({ index, value })
-    });
-    if (!response.ok) {
-      const text = await response.text();
-      return res.status(response.status).json({ error: text || '更新失败' });
-    }
-    res.json({ success: true });
-  } catch (e) {
-    console.error('更新OpenAI提供商失败:', e);
-    res.status(500).json({ error: e.message });
-  }
-});
-
-app.delete('/api/openai-providers/:name', async (req, res) => {
-  try {
-    const { name } = req.params;
-    const response = await fetch(`${CLI_PROXY_API}/openai-compatibility?name=${encodeURIComponent(name)}`, {
-      method: 'DELETE',
-      headers: { 'Authorization': `Bearer ${CLI_PROXY_KEY}` }
-    });
-    if (!response.ok) {
-      const text = await response.text();
-      return res.status(response.status).json({ error: text || '删除失败' });
-    }
-    res.json({ success: true });
-  } catch (e) {
-    console.error('删除OpenAI提供商失败:', e);
-    res.status(500).json({ error: e.message });
   }
 });
 
@@ -1247,7 +888,7 @@ if (DEV_MODE) {
 }
 
 app.listen(PORT, () => {
-  console.log(`API站点签到管理服务运行在 http://localhost:${PORT}`);
+  console.log(`API Center 服务运行在 http://localhost:${PORT}`);
   if (DEV_MODE) {
     console.log('开发模式：请先运行 npm run dev 启动 Vite，然后访问 http://localhost:7940');
   }

@@ -1,7 +1,7 @@
 {
   "name": "api-site-manager",
   "version": "1.0.0",
-  "description": "API公益站点签到管理工具",
+  "description": "API Center 管理工具",
   "main": "server/server.js",
   "scripts": {
     "dev": "concurrently \"npm run server\" \"npm run client\"",

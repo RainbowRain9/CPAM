@@ -1,9 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import ReactDOM from 'react-dom/client'
-import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
 import App from './App.jsx'
-import ConfigPage from './pages/ConfigPage.jsx'
-import CheckinPage from './pages/CheckinPage.jsx'
 import SetupPage from './pages/SetupPage.jsx'
 import CodexPage from './pages/CodexPage.jsx'
 import OpenCodePage from './pages/OpenCodePage.jsx'
@@ -68,12 +66,11 @@ function Root() {
         <div className="flex-1">
           <Routes>
             <Route path="/" element={<App openCodeEnabled={!!currentSettings?.openCodeConfigPath} />} />
-            <Route path="/config" element={<ConfigPage />} />
-            <Route path="/checkin" element={<CheckinPage />} />
             <Route path="/codex" element={<CodexPage />} />
             {currentSettings?.openCodeConfigPath && (
               <Route path="/opencode" element={<OpenCodePage />} />
             )}
+            <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </div>
         <footer className="py-4 text-center">

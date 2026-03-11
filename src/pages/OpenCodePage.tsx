@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { apiFetch } from '../auth.js'
-import { ActionButton, AppShell, InlineIcon, PageHero } from '../components/ui'
+import { ActionButton, AppShell, GlassPanel, InlineIcon } from '../components/ui'
 import { useI18n } from '../i18n/useI18n'
 import { buildPrimaryNav } from '../navigation'
 
@@ -251,23 +251,30 @@ function OpenCodePage({ openCodeEnabled = true }) {
   return (
     <AppShell navItems={navItems} subduedParticles>
       <div className="legacy-surface space-y-6">
-        <PageHero
-          eyebrow={t('OpenCode')}
-          title={t('Shape providers, models, and orchestration presets')}
-          subtitle={t('Tune provider endpoints, model capabilities, and Oh My OpenCode presets inside the same shell that holds usage and CodeX operations.')}
-          actions={(
-            <ActionButton onClick={() => setShowAddProvider(true)} variant="primary" icon={<InlineIcon name="plus" />}>
-              {t('Add provider')}
-            </ActionButton>
-          )}
-          meta={(
-            <>
-              <span className="chip">{t('Providers')}: {providers.length}</span>
-              {ohMyConfig ? <span className="chip">Oh My: {Object.keys(ohMyConfig.agents || {}).length + Object.keys(ohMyConfig.categories || {}).length}</span> : null}
-              {saving ? <span className="chip">{t('Saving...')}</span> : null}
-            </>
-          )}
-        />
+        <GlassPanel tone="strong" className="rounded-[28px] p-5 md:p-6">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0">
+              <p className="text-xs uppercase tracking-[0.18em] faint-text">{t('OpenCode')}</p>
+              <h1 className="mt-2 text-[1.9rem] font-medium tracking-[-0.05em] text-[var(--text-primary)]">
+                {t('Shape providers, models, and orchestration presets')}
+              </h1>
+              <p className="mt-3 max-w-3xl text-sm leading-6 muted-text">
+                {t('Tune provider endpoints, model capabilities, and Oh My OpenCode presets inside the same shell that holds usage and CodeX operations.')}
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <span className="chip">{t('Providers')}: {providers.length}</span>
+                {ohMyConfig ? <span className="chip">Oh My: {Object.keys(ohMyConfig.agents || {}).length + Object.keys(ohMyConfig.categories || {}).length}</span> : null}
+                {saving ? <span className="chip">{t('Saving...')}</span> : null}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2 lg:justify-end">
+              <ActionButton onClick={() => setShowAddProvider(true)} variant="primary" icon={<InlineIcon name="plus" />}>
+                {t('Add provider')}
+              </ActionButton>
+            </div>
+          </div>
+        </GlassPanel>
 
         {/* 状态提示 */}
         {error && (

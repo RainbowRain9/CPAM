@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { apiFetch } from '../auth.js'
-import { ActionButton, AppShell, EmptyState, GlassPanel, InlineIcon, PageHero, SectionFrame } from '../components/ui'
+import { ActionButton, AppShell, EmptyState, GlassPanel, InlineIcon, SectionFrame } from '../components/ui'
 import { useI18n } from '../i18n/useI18n'
 import { buildPrimaryNav } from '../navigation'
 
@@ -321,12 +321,24 @@ export default function CodexPage({ openCodeEnabled = false }: { openCodeEnabled
   return (
     <AppShell navItems={navItems} subduedParticles>
       <div className="space-y-6">
-        <PageHero
-          eyebrow={t('CodeX account control')}
-          title={t('Manage and verify CodeX accounts backed by CLI-Proxy.')}
-          subtitle={t('Inspect account health, review quota windows, and remove low-value seats without leaving the monochrome shell.')}
-          actions={(
-            <>
+        <GlassPanel tone="strong" className="rounded-[28px] p-5 md:p-6">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0">
+              <p className="text-xs uppercase tracking-[0.18em] faint-text">{t('CodeX account control')}</p>
+              <h1 className="mt-2 text-[1.9rem] font-medium tracking-[-0.05em] text-[var(--text-primary)]">
+                {t('Manage and verify CodeX accounts backed by CLI-Proxy.')}
+              </h1>
+              <p className="mt-3 max-w-3xl text-sm leading-6 muted-text">
+                {t('Inspect account health, review quota windows, and remove low-value seats without leaving the monochrome shell.')}
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <span className="chip">{t('Live accounts')}: {accounts.filter((account) => account.checkStatus === 'valid').length}</span>
+                <span className="chip">{t('Quota cleanup')}: {cleanableAccounts.length}</span>
+                {results?.deleted ? <span className="chip">{t('Deleted')}: {String(results.deleted)}</span> : null}
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2 lg:justify-end">
               <ActionButton
                 onClick={handleCheckStatus}
                 disabled={checkingStatus || checkingQuota || accounts.length === 0}
@@ -353,16 +365,9 @@ export default function CodexPage({ openCodeEnabled = false }: { openCodeEnabled
               >
                 {t('Remove low quota')}
               </ActionButton>
-            </>
-          )}
-          meta={(
-            <>
-              <span className="chip">{t('Live accounts')}: {accounts.filter((account) => account.checkStatus === 'valid').length}</span>
-              <span className="chip">{t('Quota cleanup')}: {cleanableAccounts.length}</span>
-              {results?.deleted ? <span className="chip">{t('Deleted')}: {String(results.deleted)}</span> : null}
-            </>
-          )}
-        />
+            </div>
+          </div>
+        </GlassPanel>
 
         <SectionFrame
           title={t('CodeX')}

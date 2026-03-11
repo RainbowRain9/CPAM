@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { apiFetch, saveStoredAppAuth } from '../auth.js'
-import { ActionButton, AppShell, GlassPanel, InlineIcon, PageHero } from '../components/ui'
+import { ActionButton, AppShell, GlassPanel, InlineIcon } from '../components/ui'
 import { useI18n } from '../i18n/useI18n'
 
 const SYNC_INTERVALS = [1, 3, 5, 10, 30]
@@ -138,30 +138,22 @@ export default function SetupPage({
 
   return (
     <AppShell showNav={false}>
-      <div className="grid gap-6 xl:grid-cols-[1.1fr_minmax(0,480px)]">
-        <PageHero
-          eyebrow={t('Control the full proxy surface')}
-          title={t('Welcome to API Center')}
-          subtitle={showAuthForm
-            ? t('Authenticate against your CLI-Proxy management endpoint, then save local access settings for the dashboard.')
-            : t('Connect CLI-Proxy, set a sync rhythm, and unlock a calmer management surface for usage, CodeX, and OpenCode.')}
-          meta={setupMeta}
-        />
-
+      <div className="mx-auto flex w-full max-w-[560px] flex-col gap-5">
         <GlassPanel tone="strong" className="rounded-[32px] p-6 md:p-7">
           <div className="mb-6 flex items-start justify-between gap-4">
             <div>
-              <p className="text-xs uppercase tracking-[0.2em] faint-text">
-                {showAuthForm ? t('Step 1') : t('Step 2')}
-              </p>
-              <h2 className="mt-2 text-2xl font-medium tracking-[-0.04em] text-[var(--text-primary)]">
+              <p className="text-xs uppercase tracking-[0.2em] faint-text">{t('Welcome to API Center')}</p>
+              <h1 className="mt-2 text-[1.8rem] font-medium tracking-[-0.05em] text-[var(--text-primary)]">
                 {showAuthForm ? t('Verify access') : t('Save runtime settings')}
-              </h2>
+              </h1>
               <p className="mt-3 text-sm leading-6 muted-text">
                 {showAuthForm
                   ? t('Provide your CLI-Proxy address and management password to continue.')
                   : t('These values stay local to API Center and can be reopened from the footer at any time.')}
               </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                {setupMeta}
+              </div>
             </div>
             <div className="chip">{blocked ? t('Blocked') : t('Ready')}</div>
           </div>
@@ -287,7 +279,7 @@ export default function SetupPage({
         </GlassPanel>
       </div>
 
-      <div className="mt-6 grid gap-4 md:grid-cols-3">
+      <div className="mx-auto mt-6 grid w-full max-w-[1040px] gap-4 md:grid-cols-3">
         <InfoChip
           icon={<InlineIcon name="refresh" className="h-4 w-4" />}
           label={t('Sync')}

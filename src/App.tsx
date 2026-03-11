@@ -9,7 +9,7 @@ import {
   YAxis,
 } from 'recharts'
 import { apiFetch, createApiEventSource } from './auth.js'
-import { ActionButton, AppShell, PageHero, InlineIcon } from './components/ui'
+import { ActionButton, AppShell, InlineIcon } from './components/ui'
 import { useI18n } from './i18n/useI18n'
 import { buildPrimaryNav } from './navigation'
 import { useTheme } from './theme/useTheme'
@@ -992,29 +992,36 @@ function App({ openCodeEnabled }) {
   return (
     <AppShell navItems={navItems} subduedParticles>
       <div className="legacy-surface space-y-6">
-        <PageHero
-          eyebrow={t('Overview')}
-          title={t('Usage intelligence in a quieter shell')}
-          subtitle={t('Track request trends, service health, API and model distribution, and browser-only price estimates from one monochrome dashboard.')}
-          actions={(
-            <ActionButton
-              onClick={handleManualSync}
-              disabled={syncing}
-              variant="primary"
-              icon={<InlineIcon name="refresh" className={syncing ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />}
-              loading={syncing}
-            >
-              {syncing ? t('Syncing...') : t('Manual sync')}
-            </ActionButton>
-          )}
-          meta={(
-            <>
-              <span className="chip">{t('Last updated')}: {formatTime(lastExport)}</span>
-              <span className="chip">{t('Active tab')}: {activeTab}</span>
-              <span className="chip">{t('Requests')}: {formatNumber(overviewStats.totalRequests)}</span>
-            </>
-          )}
-        />
+        <div className="surface-panel rounded-[28px] p-5 md:p-6">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+            <div className="min-w-0">
+              <p className="text-xs uppercase tracking-[0.18em] faint-text">{t('Overview')}</p>
+              <h1 className="mt-2 text-[1.95rem] font-medium tracking-[-0.05em] text-[var(--text-primary)]">
+                {t('Usage intelligence in a quieter shell')}
+              </h1>
+              <p className="mt-3 max-w-3xl text-sm leading-6 muted-text">
+                {t('Track request trends, service health, API and model distribution, and browser-only price estimates from one monochrome dashboard.')}
+              </p>
+              <div className="mt-4 flex flex-wrap gap-2">
+                <span className="chip">{t('Last updated')}: {formatTime(lastExport)}</span>
+                <span className="chip">{t('Active tab')}: {activeTab}</span>
+                <span className="chip">{t('Requests')}: {formatNumber(overviewStats.totalRequests)}</span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2 lg:justify-end">
+              <ActionButton
+                onClick={handleManualSync}
+                disabled={syncing}
+                variant="primary"
+                icon={<InlineIcon name="refresh" className={syncing ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />}
+                loading={syncing}
+              >
+                {syncing ? t('Syncing...') : t('Manual sync')}
+              </ActionButton>
+            </div>
+          </div>
+        </div>
 
         {syncMessage && <p className="text-sm text-[var(--success)]">{syncMessage}</p>}
         {syncError && <p className="text-sm text-[var(--danger)]">{syncError}</p>}
@@ -1348,7 +1355,7 @@ function App({ openCodeEnabled }) {
                                 <span className="text-sm text-[#0d0d0d]">{request.endpoint}</span>
                               </td>
                               <td className="px-4 py-3">
-                                <span className="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-[#f0f0f0] text-[#0d0d0d]">
+                                <span className="inline-flex items-center rounded-full border border-[var(--border-color)] bg-[var(--bg-secondary)] px-2.5 py-1 text-xs font-medium text-[var(--text-primary)]">
                                   {request.model}
                                 </span>
                               </td>
@@ -1358,7 +1365,7 @@ function App({ openCodeEnabled }) {
                                     {sourceInfo.label}
                                   </span>
                                   {sourceInfo.channel && (
-                                    <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-[#e5e5e5] text-[#6e6e80] uppercase">
+                                    <span className="rounded-full border border-[var(--border-color)] bg-[var(--bg-secondary)] px-1.5 py-0.5 text-[10px] font-medium uppercase text-[var(--text-secondary)]">
                                       {sourceInfo.channel}
                                     </span>
                                   )}

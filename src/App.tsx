@@ -11,13 +11,19 @@ import {
 import { apiFetch, createApiEventSource } from './auth.js'
 import { ActionButton, AppShell, InlineIcon } from './components/ui'
 import { useI18n } from './i18n/useI18n'
+import { MODEL_PRICING_PRESETS } from './modelPricingPresets'
+import {
+  loadLocalModelPricingState,
+  mergeModelPricingMaps,
+  migrateServerPricing,
+  persistLocalModelPricingState,
+} from './modelPricingState'
 import { buildPrimaryNav } from './navigation'
 import { useTheme } from './theme/useTheme'
 
 const DEFAULT_REQUESTS_PER_PAGE = 10
 const REQUESTS_PER_PAGE_OPTIONS = [10, 20, 50, 100]
 const RECENT_WINDOW_MINUTES = 30
-const LOCAL_MODEL_PRICING_KEY = 'api-center-local-model-pricing-v1'
 const SERVICE_HEALTH_ROWS = 7
 const SERVICE_HEALTH_COLS = 48
 const SERVICE_HEALTH_BLOCK_MS = 30 * 60 * 1000
@@ -193,56 +199,7 @@ function getTotalTokens(tokens = {}) {
   if (total > 0) return total
   return getInputTokens(tokens) + getOutputTokens(tokens) + getCachedTokens(tokens) + getReasoningTokens(tokens)
 }
-
-function normalizeLocalPricingMap(rawValue) {
-  if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
-    return {}
-  }
-
-  const normalized = {}
-  Object.entries(rawValue).forEach(([model, value]) => {
-    if (!model || !value || typeof value !== 'object' || Array.isArray(value)) return
-
-    const promptPrice = toNonNegativeNumber(value.promptPrice ?? value.prompt ?? value.inputPrice)
-    const completionPrice = toNonNegativeNumber(value.completionPrice ?? value.completion ?? value.outputPrice)
-    const cacheRaw = value.cachePrice ?? value.cache ?? value.inputPrice ?? value.promptPrice ?? value.prompt
-    const cachePrice = toNonNegativeNumber(cacheRaw)
-
-    normalized[model] = {
-      promptPrice,
-      completionPrice,
-      cachePrice: cachePrice > 0 ? cachePrice : promptPrice,
-    }
-  })
-
-  return normalized
-}
-
-function loadLocalModelPricing() {
-  try {
-    if (typeof window === 'undefined') return {}
-    const raw = window.localStorage.getItem(LOCAL_MODEL_PRICING_KEY)
-    if (!raw) return {}
-    return normalizeLocalPricingMap(JSON.parse(raw))
-  } catch {
-    return {}
-  }
-}
-
-function persistLocalModelPricing(pricing) {
-  try {
-    if (typeof window === 'undefined') return
-    window.localStorage.setItem(LOCAL_MODEL_PRICING_KEY, JSON.stringify(pricing))
-  } catch {
-    console.warn('保存本地模型价格失败')
-  }
-}
-
-function migrateServerPricing(serverPricing) {
-  return normalizeLocalPricingMap(serverPricing)
-}
-
-const INITIAL_LOCAL_MODEL_PRICING = loadLocalModelPricing()
+const INITIAL_LOCAL_MODEL_PRICING_STATE = loadLocalModelPricingState()
 
 function calculateAggregateCost(modelName, inputTokens, outputTokens, cachedTokens, pricingMap) {
   const pricing = pricingMap[modelName]
@@ -836,7 +793,7 @@ function OverviewCard({ title, value, meta = null, valueClassName = 'text-[#0d0d
 }
 
 function App({ openCodeEnabled }) {
-  const pricingSeededRef = useRef(Object.keys(INITIAL_LOCAL_MODEL_PRICING).length > 0)
+  const pricingSeededRef = useRef(INITIAL_LOCAL_MODEL_PRICING_STATE.hasStoredPricing)
   const { t } = useI18n()
   const { resolvedTheme } = useTheme()
 
@@ -845,7 +802,11 @@ function App({ openCodeEnabled }) {
   const [lastExport, setLastExport] = useState(null)
   const [activeTab, setActiveTab] = useState('requests')
   const [keyProviderCache, setKeyProviderCache] = useState({})
-  const [modelPricing, setModelPricing] = useState(INITIAL_LOCAL_MODEL_PRICING)
+  const [modelPricing, setModelPricing] = useState(INITIAL_LOCAL_MODEL_PRICING_STATE.pricing)
+  const [removedPresetModels, setRemovedPresetModels] = useState(
+    INITIAL_LOCAL_MODEL_PRICING_STATE.removedPresetModels
+  )
+  const [presetOptIn, setPresetOptIn] = useState(INITIAL_LOCAL_MODEL_PRICING_STATE.presetOptIn)
   const [selectedModel, setSelectedModel] = useState('')
   const [promptPrice, setPromptPrice] = useState('')
   const [completionPrice, setCompletionPrice] = useState('')
@@ -896,7 +857,7 @@ function App({ openCodeEnabled }) {
         if (!pricingSeededRef.current) {
           const migratedPricing = migrateServerPricing(data.modelPricing || {})
           if (Object.keys(migratedPricing).length > 0) {
-            setModelPricing(migratedPricing)
+            setModelPricing((currentPricing) => mergeModelPricingMaps(currentPricing, migratedPricing))
             pricingSeededRef.current = true
           }
         }
@@ -915,14 +876,12 @@ function App({ openCodeEnabled }) {
   }, [])
 
   useEffect(() => {
-    persistLocalModelPricing(modelPricing)
-  }, [modelPricing])
-
-  useEffect(() => {
-    if (Object.keys(modelPricing).length > 0) {
-      pricingSeededRef.current = true
-    }
-  }, [modelPricing])
+    persistLocalModelPricingState({
+      pricing: modelPricing,
+      removedPresetModels,
+      presetOptIn,
+    })
+  }, [modelPricing, presetOptIn, removedPresetModels])
 
   useEffect(() => {
     const es = createApiEventSource('/api/usage/stream')
@@ -980,6 +939,7 @@ function App({ openCodeEnabled }) {
   const handleSavePricing = () => {
     if (!selectedModel) return
 
+    pricingSeededRef.current = true
     const nextPricing = {
       ...modelPricing,
       [selectedModel]: {
@@ -992,6 +952,7 @@ function App({ openCodeEnabled }) {
     }
 
     setModelPricing(nextPricing)
+    setRemovedPresetModels((prev) => prev.filter((model) => model !== selectedModel))
     setSelectedModel('')
     setPromptPrice('')
     setCompletionPrice('')
@@ -999,13 +960,21 @@ function App({ openCodeEnabled }) {
   }
 
   const handleDeletePricing = (model) => {
+    pricingSeededRef.current = true
     const nextPricing = { ...modelPricing }
     delete nextPricing[model]
     setModelPricing(nextPricing)
+
+    if (MODEL_PRICING_PRESETS[model]) {
+      setRemovedPresetModels((prev) => Array.from(new Set([...prev, model])).sort())
+    }
   }
 
   const handleClearAllPricing = () => {
+    pricingSeededRef.current = true
     setModelPricing({})
+    setRemovedPresetModels(Object.keys(MODEL_PRICING_PRESETS))
+    setPresetOptIn(false)
     setSelectedModel('')
     setPromptPrice('')
     setCompletionPrice('')
@@ -1032,7 +1001,13 @@ function App({ openCodeEnabled }) {
   const credentialStats = buildCredentialStats(requestDetails, keyProviderCache)
   const modelStats = buildModelStats(usage, modelPricing, requestDetails, modelSortBy)
   const dailyStats = buildDailyStats(dailyTrendData)
-  const availableModels = getAvailableModels(usage)
+  const availableModels = useMemo(() => {
+    return Array.from(new Set([
+      ...getAvailableModels(usage),
+      ...Object.keys(MODEL_PRICING_PRESETS),
+      ...Object.keys(modelPricing),
+    ])).sort()
+  }, [modelPricing, usage])
   const hasAnyPricing = Object.keys(modelPricing).length > 0
 
   const totalRequestPages = Math.max(1, Math.ceil(requestDetails.length / requestsPerPage))

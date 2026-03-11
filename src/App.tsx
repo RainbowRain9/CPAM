@@ -21,6 +21,7 @@ const LOCAL_MODEL_PRICING_KEY = 'api-center-local-model-pricing-v1'
 const SERVICE_HEALTH_ROWS = 7
 const SERVICE_HEALTH_COLS = 48
 const SERVICE_HEALTH_BLOCK_MS = 30 * 60 * 1000
+const SERVICE_HEALTH_AXIS_STEP = SERVICE_HEALTH_COLS / 4
 const SERVICE_HEALTH_ACTIVITY_LABELS = ['无请求', '需关注', '平稳', '稳定', '强劲']
 const SERVICE_HEALTH_PALETTES = {
   dark: {
@@ -56,6 +57,13 @@ const SERVICE_HEALTH_PALETTES = {
     ],
   },
 }
+const SERVICE_HEALTH_AXIS_MARKERS = [
+  { label: '00:00', columnStart: 1, justifySelf: 'start', translateX: '0%' },
+  { label: '06:00', columnStart: SERVICE_HEALTH_AXIS_STEP + 1, justifySelf: 'start', translateX: '-50%' },
+  { label: '12:00', columnStart: SERVICE_HEALTH_AXIS_STEP * 2 + 1, justifySelf: 'start', translateX: '-50%' },
+  { label: '18:00', columnStart: SERVICE_HEALTH_AXIS_STEP * 3 + 1, justifySelf: 'start', translateX: '-50%' },
+  { label: '24:00', columnStart: SERVICE_HEALTH_COLS, justifySelf: 'end', translateX: '0%' },
+]
 
 function toSafeNumber(value) {
   const num = Number(value)
@@ -1291,14 +1299,22 @@ function App({ openCodeEnabled }) {
                   <div className="grid grid-cols-[52px_minmax(0,1fr)] gap-3 mt-3">
                     <div />
                     <div
-                      className="grid text-[11px] text-[var(--text-tertiary)]"
-                      style={{ gridTemplateColumns: 'repeat(5, minmax(0, 1fr))' }}
+                      className="grid gap-[3px] text-[11px] text-[var(--text-tertiary)]"
+                      style={{ gridTemplateColumns: `repeat(${SERVICE_HEALTH_COLS}, minmax(0, 1fr))` }}
                     >
-                      <span className="text-left">00:00</span>
-                      <span className="text-center">06:00</span>
-                      <span className="text-center">12:00</span>
-                      <span className="text-center">18:00</span>
-                      <span className="text-right">24:00</span>
+                      {SERVICE_HEALTH_AXIS_MARKERS.map((marker) => (
+                        <span
+                          key={marker.label}
+                          className="whitespace-nowrap"
+                          style={{
+                            gridColumn: `${marker.columnStart} / span 1`,
+                            justifySelf: marker.justifySelf,
+                            transform: `translateX(${marker.translateX})`,
+                          }}
+                        >
+                          {marker.label}
+                        </span>
+                      ))}
                     </div>
                   </div>
                 </div>

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
+import { apiFetch } from '../auth.js'
 
 const MODALITY_OPTIONS = ['text', 'image', 'pdf', 'audio', 'video']
 
@@ -55,7 +56,7 @@ function OpenCodePage() {
 
   const fetchConfig = async () => {
     try {
-      const res = await fetch('/api/opencode/config')
+      const res = await apiFetch('/api/opencode/config')
       if (!res.ok) {
         const data = await res.json()
         setError(data.error || '加载失败')
@@ -76,7 +77,7 @@ function OpenCodePage() {
     setError('')
     setSuccess('')
     try {
-      const res = await fetch('/api/opencode/config', {
+      const res = await apiFetch('/api/opencode/config', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newConfig)
@@ -179,7 +180,7 @@ function OpenCodePage() {
   // Oh My OpenCode
   const fetchOhMy = async () => {
     try {
-      const res = await fetch('/api/opencode/oh-my')
+      const res = await apiFetch('/api/opencode/oh-my')
       if (res.ok) setOhMyConfig(await res.json())
     } catch (e) { /* ignore */ }
   }
@@ -189,7 +190,7 @@ function OpenCodePage() {
     setError('')
     setSuccess('')
     try {
-      const res = await fetch('/api/opencode/oh-my', {
+      const res = await apiFetch('/api/opencode/oh-my', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(newConf)

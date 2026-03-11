@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { createProxyMiddleware } = require('http-proxy-middleware');
@@ -25,6 +26,14 @@ function broadcastUsageUpdate(payload = {}) {
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+const AUTH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 8;
+const APP_AUTH_PASSWORD = process.env.API_CENTER_ADMIN_PASSWORD || '';
+const APP_AUTH_SECRET =
+  process.env.API_CENTER_SESSION_SECRET ||
+  crypto.createHash('sha256').update(`api-center:${APP_AUTH_PASSWORD || 'unset'}`).digest('hex');
+const loginAttempts = new Map();
 
 // 加载/保存设置
 function loadSettings() {
@@ -42,12 +51,282 @@ function saveSettings(settings) {
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf-8');
 }
 
+function isAppAuthConfigured() {
+  return Boolean(APP_AUTH_PASSWORD);
+}
+
+function shouldBlockWithoutAuthConfig() {
+  return !DEV_MODE;
+}
+
+function hashText(value) {
+  return crypto.createHash('sha256').update(String(value || '')).digest();
+}
+
+function safeTextEqual(left, right) {
+  const leftHash = hashText(left);
+  const rightHash = hashText(right);
+  return crypto.timingSafeEqual(leftHash, rightHash);
+}
+
+function getClientIp(req) {
+  const forwarded = req.headers['x-forwarded-for'];
+  if (typeof forwarded === 'string' && forwarded.trim()) {
+    return forwarded.split(',')[0].trim();
+  }
+  return req.socket?.remoteAddress || 'unknown';
+}
+
+function getAuthVersion() {
+  return crypto
+    .createHash('sha256')
+    .update(APP_AUTH_PASSWORD)
+    .digest('hex')
+    .slice(0, 24);
+}
+
+function signAuthPayload(encodedPayload) {
+  return crypto.createHmac('sha256', APP_AUTH_SECRET).update(encodedPayload).digest('hex');
+}
+
+function createAuthToken() {
+  const payload = {
+    ver: getAuthVersion(),
+    exp: Date.now() + AUTH_TOKEN_TTL_MS,
+    nonce: crypto.randomBytes(16).toString('hex')
+  };
+  const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  return {
+    token: `${encodedPayload}.${signAuthPayload(encodedPayload)}`,
+    expiresAt: payload.exp
+  };
+}
+
+function readAuthPayload(token) {
+  if (!token || typeof token !== 'string') return null;
+
+  const separatorIndex = token.lastIndexOf('.');
+  if (separatorIndex <= 0) return null;
+
+  const encodedPayload = token.slice(0, separatorIndex);
+  const signature = token.slice(separatorIndex + 1);
+  const expectedSignature = signAuthPayload(encodedPayload);
+
+  if (signature.length !== expectedSignature.length) return null;
+  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature))) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf-8'));
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (typeof parsed.exp !== 'number' || !Number.isFinite(parsed.exp)) return null;
+    if (parsed.ver !== getAuthVersion()) return null;
+    if (parsed.exp <= Date.now()) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function getAuthTokenFromRequest(req) {
+  const authHeader = req.headers.authorization;
+  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
+    return authHeader.slice(7).trim();
+  }
+
+  if (typeof req.query?.access_token === 'string' && req.query.access_token.trim()) {
+    return req.query.access_token.trim();
+  }
+
+  return '';
+}
+
+function isAuthenticatedRequest(req) {
+  if (!isAppAuthConfigured()) {
+    return !shouldBlockWithoutAuthConfig();
+  }
+
+  return Boolean(readAuthPayload(getAuthTokenFromRequest(req)));
+}
+
+function getLoginRateLimitState(ip) {
+  const entry = loginAttempts.get(ip);
+  if (!entry) {
+    return { blocked: false, remaining: LOGIN_MAX_ATTEMPTS };
+  }
+
+  if (Date.now() - entry.firstAttemptAt > LOGIN_RATE_LIMIT_WINDOW_MS) {
+    loginAttempts.delete(ip);
+    return { blocked: false, remaining: LOGIN_MAX_ATTEMPTS };
+  }
+
+  const blocked = entry.count >= LOGIN_MAX_ATTEMPTS;
+  return {
+    blocked,
+    retryAfterMs: blocked
+      ? Math.max(0, LOGIN_RATE_LIMIT_WINDOW_MS - (Date.now() - entry.firstAttemptAt))
+      : 0,
+    remaining: Math.max(0, LOGIN_MAX_ATTEMPTS - entry.count)
+  };
+}
+
+function recordLoginFailure(ip) {
+  const entry = loginAttempts.get(ip);
+  if (!entry || Date.now() - entry.firstAttemptAt > LOGIN_RATE_LIMIT_WINDOW_MS) {
+    loginAttempts.set(ip, { count: 1, firstAttemptAt: Date.now() });
+    return;
+  }
+
+  entry.count += 1;
+}
+
+function clearLoginFailures(ip) {
+  loginAttempts.delete(ip);
+}
+
+function getAuthStatusPayload(req) {
+  const passwordConfigured = isAppAuthConfigured();
+  const blocked = !passwordConfigured && shouldBlockWithoutAuthConfig();
+  return {
+    authenticated: isAuthenticatedRequest(req),
+    loginRequired: passwordConfigured,
+    blocked,
+    message: blocked
+      ? '服务端未配置 API_CENTER_ADMIN_PASSWORD，已禁止公开访问'
+      : ''
+  };
+}
+
+function requireAppAuth(req, res, next) {
+  if (!isAppAuthConfigured()) {
+    if (shouldBlockWithoutAuthConfig()) {
+      return res.status(503).json({ error: '服务端未配置 API_CENTER_ADMIN_PASSWORD' });
+    }
+    return next();
+  }
+
+  if (isAuthenticatedRequest(req)) {
+    return next();
+  }
+
+  return res.status(401).json({ error: '请先登录', code: 'AUTH_REQUIRED' });
+}
+
+function normalizeCliProxyBaseUrl(baseUrl) {
+  return String(baseUrl || '')
+    .trim()
+    .replace(/\/+$/, '')
+    .replace(/\/v0\/management$/i, '');
+}
+
+function getCliProxyManagementBase(baseUrl) {
+  return `${normalizeCliProxyBaseUrl(baseUrl)}/v0/management`;
+}
+
+async function validateCliProxyManagementAccess(cliProxyUrl, cliProxyKey) {
+  const normalizedBaseUrl = normalizeCliProxyBaseUrl(cliProxyUrl);
+  const normalizedKey = String(cliProxyKey || '').trim();
+
+  if (!normalizedBaseUrl || !normalizedKey) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'CLI-Proxy 地址和管理密码不能为空'
+    };
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8000);
+  const managementBase = getCliProxyManagementBase(normalizedBaseUrl);
+  const endpoints = [
+    `${managementBase}/config`,
+    `${managementBase}/openai-compatibility`,
+    `${managementBase}/auth-files`
+  ];
+
+  try {
+    for (const endpoint of endpoints) {
+      const response = await fetch(endpoint, {
+        headers: { Authorization: `Bearer ${normalizedKey}` },
+        signal: controller.signal
+      });
+
+      if (response.ok) {
+        return { ok: true, normalizedBaseUrl };
+      }
+
+      if (response.status === 404) {
+        continue;
+      }
+
+      if (response.status === 401 || response.status === 403) {
+        return {
+          ok: false,
+          status: 401,
+          error: 'CLI-Proxy 管理密码错误'
+        };
+      }
+
+      if (response.status >= 500) {
+        return {
+          ok: false,
+          status: 502,
+          error: 'CLI-Proxy 服务暂时不可用，请稍后再试'
+        };
+      }
+
+      let detail = '';
+      try {
+        const payload = await response.json();
+        detail = payload?.error || payload?.message || '';
+      } catch {
+        try {
+          detail = await response.text();
+        } catch {
+          detail = '';
+        }
+      }
+
+      return {
+        ok: false,
+        status: 400,
+        error: detail
+          ? `CLI-Proxy 校验失败：${String(detail).slice(0, 120)}`
+          : `CLI-Proxy 校验失败（HTTP ${response.status}）`
+      };
+    }
+
+    return {
+      ok: false,
+      status: 404,
+      error: 'CLI-Proxy 管理接口不可用，请确认地址是否正确'
+    };
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      return {
+        ok: false,
+        status: 504,
+        error: '连接 CLI-Proxy 超时，请检查地址或网络'
+      };
+    }
+
+    return {
+      ok: false,
+      status: 502,
+      error: `无法连接 CLI-Proxy：${error?.message || '网络异常'}`
+    };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // 获取CLI-Proxy配置（动态）
 function getCliProxyConfig() {
   const settings = loadSettings();
   if (!settings) return null;
   return {
-    baseUrl: settings.cliProxyUrl || 'http://localhost:8317',
+    baseUrl: normalizeCliProxyBaseUrl(settings.cliProxyUrl || 'http://localhost:8317'),
     apiKey: settings.cliProxyKey || 'cli-proxy-admin',
     configPath: settings.cliProxyConfigPath || ''
   };
@@ -74,7 +353,53 @@ function getSyncInterval() {
 
 app.use(cors());
 app.use(express.json());
+app.disable('x-powered-by');
 app.use(express.static(path.join(__dirname, '..', 'dist')));
+
+app.get('/api/auth/status', (req, res) => {
+  res.json(getAuthStatusPayload(req));
+});
+
+app.post('/api/auth/login', (req, res) => {
+  if (!isAppAuthConfigured()) {
+    if (shouldBlockWithoutAuthConfig()) {
+      return res.status(503).json({ error: '服务端未配置 API_CENTER_ADMIN_PASSWORD' });
+    }
+    return res.json({ success: true, bypassed: true });
+  }
+
+  const ip = getClientIp(req);
+  const rateLimitState = getLoginRateLimitState(ip);
+  if (rateLimitState.blocked) {
+    const retryAfterSeconds = Math.ceil((rateLimitState.retryAfterMs || 0) / 1000);
+    return res.status(429).json({
+      error: `登录尝试过多，请 ${retryAfterSeconds} 秒后再试`
+    });
+  }
+
+  const { password } = req.body || {};
+  const passwordValid = safeTextEqual(password || '', APP_AUTH_PASSWORD);
+
+  if (!passwordValid) {
+    recordLoginFailure(ip);
+    return res.status(401).json({ error: '访问密码错误' });
+  }
+
+  clearLoginFailures(ip);
+  const authToken = createAuthToken();
+  return res.json({
+    success: true,
+    token: authToken.token,
+    expiresAt: authToken.expiresAt
+  });
+});
+
+app.use('/api', (req, res, next) => {
+  if (req.path.startsWith('/auth/')) {
+    return next();
+  }
+  return requireAppAuth(req, res, next);
+});
 
 app.get('/api/usage/stream', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
@@ -123,15 +448,20 @@ app.get('/api/settings', (req, res) => {
   });
 });
 
-app.post('/api/settings', (req, res) => {
+app.post('/api/settings', async (req, res) => {
   const { cliProxyUrl, cliProxyKey, cliProxyConfigPath, syncInterval } = req.body;
   if (!cliProxyUrl || !cliProxyKey) {
-    return res.status(400).json({ error: 'CLI-Proxy 地址和密码不能为空' });
+    return res.status(400).json({ error: 'CLI-Proxy 地址和管理密码不能为空' });
+  }
+
+  const validation = await validateCliProxyManagementAccess(cliProxyUrl, cliProxyKey);
+  if (!validation.ok) {
+    return res.status(validation.status || 400).json({ error: validation.error });
   }
   
   const settings = loadSettings() || {};
-  settings.cliProxyUrl = cliProxyUrl;
-  settings.cliProxyKey = cliProxyKey;
+  settings.cliProxyUrl = validation.normalizedBaseUrl;
+  settings.cliProxyKey = String(cliProxyKey).trim();
   settings.cliProxyConfigPath = cliProxyConfigPath || '';
   if (req.body.openCodeConfigPath !== undefined) {
     settings.openCodeConfigPath = req.body.openCodeConfigPath;
@@ -598,7 +928,41 @@ function toFiniteNumber(value) {
   return Number.isFinite(num) ? num : null;
 }
 
-function normalizeCodexQuotaWindow(window, source, fallbackDurationSeconds = null) {
+function resolveCodexWindowSeconds(window, fallbackDurationSeconds = null) {
+  return (
+    toFiniteNumber(
+      window?.limit_window_seconds ??
+      window?.limitWindowSeconds ??
+      window?.duration_seconds ??
+      window?.durationSeconds ??
+      window?.window_seconds ??
+      window?.windowSeconds ??
+      window?.window_size_seconds ??
+      window?.windowSizeSeconds ??
+      window?.interval_seconds ??
+      window?.intervalSeconds
+    ) ?? fallbackDurationSeconds
+  );
+}
+
+function resolveCodexResetAt(window) {
+  const resetAt = toFiniteNumber(window?.reset_at ?? window?.resetAt);
+  if (resetAt !== null && resetAt > 0) {
+    return resetAt;
+  }
+
+  const resetAfterSeconds = toFiniteNumber(
+    window?.reset_after_seconds ??
+    window?.resetAfterSeconds
+  );
+  if (resetAfterSeconds !== null && resetAfterSeconds > 0) {
+    return Math.floor(Date.now() / 1000 + resetAfterSeconds);
+  }
+
+  return null;
+}
+
+function normalizeCodexQuotaWindow(window, source, fallbackDurationSeconds = null, options = {}) {
   if (!window || typeof window !== 'object') return null;
 
   const usedPercentValue = toFiniteNumber(
@@ -608,24 +972,14 @@ function normalizeCodexQuotaWindow(window, source, fallbackDurationSeconds = nul
     window.percentUsed
   );
 
-  if (usedPercentValue === null) {
+  const resetAt = resolveCodexResetAt(window);
+  const isLimitReached = Boolean(options.limitReached) || options.allowed === false;
+  if (usedPercentValue === null && !(isLimitReached && resetAt !== null)) {
     return null;
   }
 
-  const durationSeconds =
-    toFiniteNumber(
-      window.duration_seconds ??
-      window.durationSeconds ??
-      window.window_seconds ??
-      window.windowSeconds ??
-      window.window_size_seconds ??
-      window.windowSizeSeconds ??
-      window.interval_seconds ??
-      window.intervalSeconds
-    ) ?? fallbackDurationSeconds;
-
-  const resetAt = toFiniteNumber(window.reset_at ?? window.resetAt);
-  const usedPercent = Math.max(0, Math.min(100, usedPercentValue));
+  const durationSeconds = resolveCodexWindowSeconds(window, fallbackDurationSeconds);
+  const usedPercent = Math.max(0, Math.min(100, usedPercentValue ?? 100));
 
   return {
     source,
@@ -638,12 +992,15 @@ function normalizeCodexQuotaWindow(window, source, fallbackDurationSeconds = nul
 
 function extractCodexQuotaWindows(rateLimit) {
   const normalizedWindows = [];
+  const limitReached = rateLimit?.limit_reached ?? rateLimit?.limitReached;
+  const allowed = rateLimit?.allowed;
 
   if (rateLimit?.primary_window) {
     const primaryWindow = normalizeCodexQuotaWindow(
       rateLimit.primary_window,
       'primary',
-      CODEX_FIVE_HOUR_WINDOW_SECONDS
+      CODEX_FIVE_HOUR_WINDOW_SECONDS,
+      { limitReached, allowed }
     );
     if (primaryWindow) {
       normalizedWindows.push(primaryWindow);
@@ -654,7 +1011,8 @@ function extractCodexQuotaWindows(rateLimit) {
     const secondaryWindow = normalizeCodexQuotaWindow(
       rateLimit.secondary_window,
       'secondary',
-      CODEX_WEEKLY_WINDOW_SECONDS
+      CODEX_WEEKLY_WINDOW_SECONDS,
+      { limitReached, allowed }
     );
     if (secondaryWindow) {
       normalizedWindows.push(secondaryWindow);
@@ -663,7 +1021,12 @@ function extractCodexQuotaWindows(rateLimit) {
 
   if (Array.isArray(rateLimit?.windows)) {
     rateLimit.windows.forEach((window, index) => {
-      const normalizedWindow = normalizeCodexQuotaWindow(window, `windows[${index}]`);
+      const normalizedWindow = normalizeCodexQuotaWindow(
+        window,
+        `windows[${index}]`,
+        null,
+        { limitReached, allowed }
+      );
       if (normalizedWindow) {
         normalizedWindows.push(normalizedWindow);
       }

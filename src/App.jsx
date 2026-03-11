@@ -9,6 +9,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts'
+import { apiFetch, createApiEventSource } from './auth.js'
 
 const REQUESTS_PER_PAGE = 50
 const RECENT_WINDOW_MINUTES = 30
@@ -78,6 +79,15 @@ function formatRelativeTime(isoString) {
     hour: '2-digit',
     minute: '2-digit',
   })
+}
+
+function maskSensitiveValue(value) {
+  const text = typeof value === 'string' ? value.trim() : String(value || '').trim()
+  if (!text) return '-'
+  if (text.length <= 8) {
+    return `${text.slice(0, 2)}***${text.slice(-2)}`
+  }
+  return `${text.slice(0, 4)}***${text.slice(-4)}`
 }
 
 function interpolateColor(from, to, ratio) {
@@ -634,6 +644,86 @@ function getAvailableModels(usage) {
   return Array.from(models).sort()
 }
 
+function resolveCredentialStatInfo(detail, keyProviderCache) {
+  const authIndexKey = detail.authIndex === undefined || detail.authIndex === null
+    ? ''
+    : String(detail.authIndex)
+  const sourceKey = detail.source || ''
+  const authInfo = authIndexKey ? keyProviderCache?.[authIndexKey] : null
+  const sourceInfo = sourceKey ? keyProviderCache?.[sourceKey] : null
+  const cacheInfo = authInfo || sourceInfo || null
+
+  const displayName =
+    authInfo?.email ||
+    sourceInfo?.email ||
+    (cacheInfo?.channel === 'api-key'
+      ? cacheInfo?.provider
+      : cacheInfo?.provider || cacheInfo?.source) ||
+    (authIndexKey ? `认证索引 ${authIndexKey}` : '') ||
+    (sourceKey ? maskSensitiveValue(sourceKey) : '未知凭证')
+
+  const subtitle = authIndexKey
+    ? `auth_index: ${authIndexKey}`
+    : sourceKey
+      ? `source: ${maskSensitiveValue(sourceKey)}`
+      : ''
+
+  return {
+    key: authIndexKey ? `auth:${authIndexKey}` : sourceKey ? `source:${sourceKey}` : `unknown:${detail.id}`,
+    displayName,
+    subtitle,
+    type: authInfo?.channel || sourceInfo?.channel || '',
+  }
+}
+
+function buildCredentialStats(requestDetails, keyProviderCache) {
+  const rowsByKey = new Map()
+
+  requestDetails.forEach((detail) => {
+    const credentialInfo = resolveCredentialStatInfo(detail, keyProviderCache)
+    if (!rowsByKey.has(credentialInfo.key)) {
+      rowsByKey.set(credentialInfo.key, {
+        key: credentialInfo.key,
+        displayName: credentialInfo.displayName,
+        subtitle: credentialInfo.subtitle,
+        type: credentialInfo.type,
+        requests: 0,
+        successCount: 0,
+        failureCount: 0,
+        totalTokens: 0,
+        totalCost: 0,
+        pricedRequestCount: 0,
+        lastUsedMs: 0,
+        lastUsed: '',
+      })
+    }
+
+    const row = rowsByKey.get(credentialInfo.key)
+    row.requests += 1
+    row.successCount += detail.failed ? 0 : 1
+    row.failureCount += detail.failed ? 1 : 0
+    row.totalTokens += detail.totalTokens
+    if (detail.cost !== null) {
+      row.totalCost += detail.cost
+      row.pricedRequestCount += 1
+    }
+    if (detail.timestampMs > row.lastUsedMs) {
+      row.lastUsedMs = detail.timestampMs
+      row.lastUsed = detail.timestamp
+    }
+  })
+
+  return Array.from(rowsByKey.values())
+    .map((row) => ({
+      ...row,
+      successRate: row.requests > 0 ? (row.successCount / row.requests) * 100 : 100,
+    }))
+    .sort((a, b) => {
+      if (b.requests !== a.requests) return b.requests - a.requests
+      return b.lastUsedMs - a.lastUsedMs
+    })
+}
+
 function resolveSourceInfo(request, keyProviderCache) {
   const authIndexKey = request.authIndex === undefined || request.authIndex === null
     ? ''
@@ -713,7 +803,7 @@ function App({ openCodeEnabled }) {
 
   const fetchUsage = async () => {
     try {
-      const res = await fetch('/api/usage')
+      const res = await apiFetch('/api/usage')
       if (res.ok) {
         const data = await res.json()
         setUsage(data.usage)
@@ -752,7 +842,7 @@ function App({ openCodeEnabled }) {
   }, [modelPricing])
 
   useEffect(() => {
-    const es = new EventSource('/api/usage/stream')
+    const es = createApiEventSource('/api/usage/stream')
     es.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data)
@@ -774,7 +864,7 @@ function App({ openCodeEnabled }) {
     setSyncMessage('')
 
     try {
-      const res = await fetch('/api/usage/export-now', { method: 'POST' })
+      const res = await apiFetch('/api/usage/export-now', { method: 'POST' })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         throw new Error(data.error || `手动同步失败：${res.status}`)
@@ -856,6 +946,7 @@ function App({ openCodeEnabled }) {
   const serviceHealth = buildServiceHealthData(requestDetails)
   const hasServiceHealthData = serviceHealth.totalSuccess + serviceHealth.totalFailure > 0
   const apiStats = buildApiStats(usage, modelPricing)
+  const credentialStats = buildCredentialStats(requestDetails, keyProviderCache)
   const modelStats = buildModelStats(usage, modelPricing, requestDetails, modelSortBy)
   const dailyStats = buildDailyStats(dailyTrendData)
   const availableModels = getAvailableModels(usage)
@@ -902,7 +993,7 @@ function App({ openCodeEnabled }) {
             <div>
               <h1 className="text-3xl font-semibold text-[#0d0d0d] mb-2">使用统计</h1>
               <p className="text-[#6e6e80]">
-                按小时与按天查看请求趋势、API 与模型分布、服务健康监测和费用估算 · 最后更新: {formatTime(lastExport)}
+                按小时与按天查看请求趋势、凭证/API/模型分布、服务健康监测和费用估算 · 最后更新: {formatTime(lastExport)}
               </p>
             </div>
             <div className="flex items-center gap-3">
@@ -1164,6 +1255,9 @@ function App({ openCodeEnabled }) {
               <TabButton active={activeTab === 'requests'} onClick={() => setActiveTab('requests')}>
                 请求记录
               </TabButton>
+              <TabButton active={activeTab === 'credentials'} onClick={() => setActiveTab('credentials')}>
+                凭证统计
+              </TabButton>
               <TabButton active={activeTab === 'apis'} onClick={() => setActiveTab('apis')}>
                 API 统计
               </TabButton>
@@ -1279,6 +1373,85 @@ function App({ openCodeEnabled }) {
                         下一页
                       </button>
                     </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeTab === 'credentials' && (
+              <div className="border border-[#e5e5e5] rounded-xl p-6">
+                <div className="flex flex-col gap-2 md:flex-row md:items-end md:justify-between mb-6">
+                  <div>
+                    <h3 className="text-base font-semibold text-[#0d0d0d]">凭证统计</h3>
+                    <p className="text-sm text-[#6e6e80] mt-1">按认证索引或来源聚合请求量、成功率和 Token 消耗</p>
+                  </div>
+                  <p className="text-sm text-[#6e6e80]">共 {formatNumber(credentialStats.length)} 个活跃凭证</p>
+                </div>
+
+                {credentialStats.length === 0 ? (
+                  <p className="text-[#6e6e80] text-sm text-center py-8">暂无凭证统计数据</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[980px]">
+                      <thead>
+                        <tr className="border-b border-[#e5e5e5]">
+                          <th className="text-left py-3 pr-4 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">凭证</th>
+                          <th className="text-right py-3 px-2 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">请求</th>
+                          <th className="text-right py-3 px-2 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">成功率</th>
+                          <th className="text-right py-3 px-2 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">总 Token</th>
+                          <th className="text-right py-3 px-2 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">费用</th>
+                          <th className="text-right py-3 pl-4 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">最近使用</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {credentialStats.map((credential) => (
+                          <tr key={credential.key} className="border-b border-[#f0f0f0] last:border-0">
+                            <td className="py-3 pr-4">
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-medium text-[#0d0d0d]">{credential.displayName}</span>
+                                {credential.type && (
+                                  <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-[#e5e5e5] text-[#6e6e80] uppercase">
+                                    {credential.type}
+                                  </span>
+                                )}
+                              </div>
+                              {credential.subtitle && (
+                                <p className="text-xs text-[#8e8ea0] mt-1">{credential.subtitle}</p>
+                              )}
+                            </td>
+                            <td className="py-3 px-2 text-right">
+                              <p className="text-sm font-medium text-[#0d0d0d]">{formatNumber(credential.requests)}</p>
+                              <p className="text-xs text-[#6e6e80] mt-1">
+                                <span className="text-[#10a37f]">{formatNumber(credential.successCount)}</span>
+                                {' / '}
+                                <span className="text-[#ef4444]">{formatNumber(credential.failureCount)}</span>
+                              </p>
+                            </td>
+                            <td className="py-3 px-2 text-right">
+                              <span className={`text-sm font-medium ${
+                                credential.successRate >= 95
+                                  ? 'text-[#10a37f]'
+                                  : credential.successRate >= 80
+                                    ? 'text-[#f59e0b]'
+                                    : 'text-[#ef4444]'
+                              }`}>
+                                {credential.successRate.toFixed(1)}%
+                              </span>
+                            </td>
+                            <td className="py-3 px-2 text-right text-sm font-medium text-[#0d0d0d]">
+                              {formatTokens(credential.totalTokens)}
+                            </td>
+                            <td className="py-3 px-2 text-right text-sm text-[#6e6e80]">
+                              {hasAnyPricing && credential.pricedRequestCount > 0 ? formatUsd(credential.totalCost) : '-'}
+                            </td>
+                            <td className="py-3 pl-4 text-right">
+                              <p className="text-sm text-[#0d0d0d]">{formatRelativeTime(credential.lastUsed)}</p>
+                              <p className="text-xs text-[#8e8ea0] mt-1">{formatTime(credential.lastUsed)}</p>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 )}
               </div>

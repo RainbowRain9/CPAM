@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
+import { apiFetch } from '../auth.js'
 
 const ITEMS_PER_PAGE = 12 // 3列 x 4行
 
@@ -119,7 +120,7 @@ function CodexPage() {
 
   const fetchAccounts = async () => {
     try {
-      const res = await fetch('/api/codex/accounts')
+      const res = await apiFetch('/api/codex/accounts')
       if (res.ok) {
         const data = await res.json()
         setAccounts(data)
@@ -140,7 +141,7 @@ function CodexPage() {
     setResults(null)
 
     try {
-      const res = await fetch('/api/codex/check', { method: 'POST' })
+      const res = await apiFetch('/api/codex/check', { method: 'POST' })
       if (res.ok) {
         const data = await res.json()
         setResults({ type: 'status', ...data })
@@ -193,7 +194,7 @@ function CodexPage() {
     try {
       // 需要获取这些账号的name来删除
       const authIndexes = toClean.map(a => a.authIndex)
-      const res = await fetch('/api/codex/delete-by-auth', {
+      const res = await apiFetch('/api/codex/delete-by-auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ authIndexes })
@@ -217,7 +218,7 @@ function CodexPage() {
     
     try {
       const names = showStatusResult.invalidAccounts.map(a => a.name).filter(Boolean)
-      const res = await fetch('/api/codex/delete', {
+      const res = await apiFetch('/api/codex/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ names })
@@ -255,7 +256,7 @@ function CodexPage() {
     console.log(`检查配额: 页码${page}, 范围${startIdx}-${endIdx}, 共${authIndexes.length}个账号`)
 
     try {
-      const res = await fetch('/api/codex/quota', { 
+      const res = await apiFetch('/api/codex/quota', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ authIndexes })

@@ -19,13 +19,43 @@ const REQUESTS_PER_PAGE_OPTIONS = [10, 20, 50, 100]
 const RECENT_WINDOW_MINUTES = 30
 const LOCAL_MODEL_PRICING_KEY = 'api-center-local-model-pricing-v1'
 const SERVICE_HEALTH_ROWS = 7
-const SERVICE_HEALTH_COLS = 96
-const SERVICE_HEALTH_BLOCK_MS = 15 * 60 * 1000
-const SERVICE_HEALTH_COLOR_STOPS = [
-  { r: 239, g: 68, b: 68 },
-  { r: 245, g: 158, b: 11 },
-  { r: 34, g: 197, b: 94 },
-]
+const SERVICE_HEALTH_COLS = 48
+const SERVICE_HEALTH_BLOCK_MS = 30 * 60 * 1000
+const SERVICE_HEALTH_ACTIVITY_LABELS = ['无请求', '需关注', '平稳', '稳定', '强劲']
+const SERVICE_HEALTH_PALETTES = {
+  dark: {
+    fills: [
+      'rgba(255, 255, 255, 0.035)',
+      'rgba(255, 255, 255, 0.12)',
+      'rgba(255, 255, 255, 0.24)',
+      'rgba(255, 255, 255, 0.42)',
+      'rgba(255, 255, 255, 0.72)',
+    ],
+    borders: [
+      'rgba(255, 255, 255, 0.08)',
+      'rgba(255, 255, 255, 0.1)',
+      'rgba(255, 255, 255, 0.12)',
+      'rgba(255, 255, 255, 0.16)',
+      'rgba(255, 255, 255, 0.22)',
+    ],
+  },
+  light: {
+    fills: [
+      'rgba(17, 17, 17, 0.035)',
+      'rgba(17, 17, 17, 0.12)',
+      'rgba(17, 17, 17, 0.24)',
+      'rgba(17, 17, 17, 0.42)',
+      'rgba(17, 17, 17, 0.68)',
+    ],
+    borders: [
+      'rgba(17, 17, 17, 0.06)',
+      'rgba(17, 17, 17, 0.08)',
+      'rgba(17, 17, 17, 0.12)',
+      'rgba(17, 17, 17, 0.16)',
+      'rgba(17, 17, 17, 0.2)',
+    ],
+  },
+}
 
 function toSafeNumber(value) {
   const num = Number(value)
@@ -94,29 +124,22 @@ function maskSensitiveValue(value) {
   return `${text.slice(0, 4)}***${text.slice(-4)}`
 }
 
-function interpolateColor(from, to, ratio) {
-  const clampedRatio = Math.max(0, Math.min(1, ratio))
-  const r = Math.round(from.r + (to.r - from.r) * clampedRatio)
-  const g = Math.round(from.g + (to.g - from.g) * clampedRatio)
-  const b = Math.round(from.b + (to.b - from.b) * clampedRatio)
-  return `rgb(${r}, ${g}, ${b})`
+function resolveServiceHealthLevel(total, rate, maxTotal) {
+  if (total <= 0 || rate < 0) return 0
+
+  const activityWeight = maxTotal > 0
+    ? Math.log(total + 1) / Math.log(maxTotal + 1)
+    : 0
+  const score = rate * 0.82 + activityWeight * 0.18
+
+  if (score >= 0.97) return 4
+  if (score >= 0.87) return 3
+  if (score >= 0.72) return 2
+  return 1
 }
 
-function rateToHealthColor(rate) {
-  if (rate < 0) return '#f8fafc'
-  if (rate <= 0.5) {
-    return interpolateColor(
-      SERVICE_HEALTH_COLOR_STOPS[0],
-      SERVICE_HEALTH_COLOR_STOPS[1],
-      rate * 2
-    )
-  }
-
-  return interpolateColor(
-    SERVICE_HEALTH_COLOR_STOPS[1],
-    SERVICE_HEALTH_COLOR_STOPS[2],
-    (rate - 0.5) * 2
-  )
+function getServiceHealthPalette(theme) {
+  return theme === 'dark' ? SERVICE_HEALTH_PALETTES.dark : SERVICE_HEALTH_PALETTES.light
 }
 
 function formatHealthBlockTime(startTime, endTime) {
@@ -437,12 +460,30 @@ function buildServiceHealthData(requestDetails) {
     totalSuccess += 1
   })
 
+  const maxBlockTotal = blockStats.reduce(
+    (max, stat) => Math.max(max, stat.success + stat.failure),
+    0
+  )
+  let activeWindowCount = 0
+  let strongWindowCount = 0
+  let watchWindowCount = 0
+
   const blocks = blockStats.map((stat, index) => {
     const total = stat.success + stat.failure
     const startTime = windowStart + index * SERVICE_HEALTH_BLOCK_MS
     const endTime = startTime + SERVICE_HEALTH_BLOCK_MS
     const rate = total > 0 ? stat.success / total : -1
     const timeRange = formatHealthBlockTime(startTime, endTime)
+    const level = resolveServiceHealthLevel(total, rate, maxBlockTotal)
+
+    if (total > 0) {
+      activeWindowCount += 1
+      if (level >= 3) {
+        strongWindowCount += 1
+      } else if (level === 1) {
+        watchWindowCount += 1
+      }
+    }
 
     return {
       key: startTime,
@@ -450,9 +491,9 @@ function buildServiceHealthData(requestDetails) {
       success: stat.success,
       failure: stat.failure,
       rate,
-      color: rateToHealthColor(rate),
+      level,
       title: total > 0
-        ? `${timeRange} | 成功 ${stat.success} | 失败 ${stat.failure} | 成功率 ${(rate * 100).toFixed(1)}%`
+        ? `${timeRange} | 成功 ${stat.success} | 失败 ${stat.failure} | 成功率 ${(rate * 100).toFixed(1)}% | 活跃度 ${SERVICE_HEALTH_ACTIVITY_LABELS[level]}`
         : `${timeRange} | 无请求`,
     }
   })
@@ -477,6 +518,9 @@ function buildServiceHealthData(requestDetails) {
     dayRows,
     totalSuccess,
     totalFailure,
+    activeWindowCount,
+    strongWindowCount,
+    watchWindowCount,
     successRate: totalRequests > 0 ? (totalSuccess / totalRequests) * 100 : 100,
   }
 }
@@ -827,6 +871,10 @@ function App({ openCodeEnabled }) {
           tokenLine: '#0f766e',
         }
   ), [resolvedTheme])
+  const serviceHealthPalette = useMemo(
+    () => getServiceHealthPalette(resolvedTheme),
+    [resolvedTheme]
+  )
 
   const fetchUsage = async () => {
     try {
@@ -1179,56 +1227,60 @@ function App({ openCodeEnabled }) {
             <div className="surface-panel rounded-[24px] p-6 mb-8">
               <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between mb-5">
                 <div>
-                  <h3 className="text-base font-semibold text-[#0d0d0d]">服务健康监测</h3>
-                  <p className="text-sm text-[#6e6e80] mt-1">最近 7 天，每格 15 分钟，按请求成功率显示服务健康状态</p>
+                  <h3 className="text-base font-semibold text-[var(--text-primary)]">服务健康活跃度</h3>
+                  <p className="mt-1 max-w-2xl text-sm text-[var(--text-secondary)]">
+                    最近 7 天，每格 30 分钟。亮度越高代表该时间窗内请求越稳定、成功率越高且活跃度更强。
+                  </p>
                 </div>
                 <div className="grid gap-3 sm:grid-cols-3">
-                  <div className="min-w-[140px] rounded-lg border border-[#e5e5e5] bg-[#fafafa] px-4 py-3">
-                    <p className="text-xs text-[#6e6e80]">整体成功率</p>
-                    <p className={`mt-1 text-lg font-semibold ${
-                      !hasServiceHealthData
-                        ? 'text-[#0d0d0d]'
-                        : serviceHealth.successRate >= 99
-                          ? 'text-[#15803d]'
-                          : serviceHealth.successRate >= 95
-                            ? 'text-[#b45309]'
-                            : 'text-[#dc2626]'
-                    }`}>
+                  <div className="min-w-[148px] rounded-2xl border border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-3 shadow-[var(--shadow-soft)]">
+                    <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--text-tertiary)]">整体成功率</p>
+                    <p className="mt-2 text-lg font-semibold text-[var(--text-primary)]">
                       {hasServiceHealthData ? `${serviceHealth.successRate.toFixed(1)}%` : '--'}
                     </p>
-                  </div>
-                  <div className="min-w-[140px] rounded-lg border border-[#bbf7d0] bg-[#f0fdf4] px-4 py-3">
-                    <p className="text-xs text-[#166534]">成功请求</p>
-                    <p className="mt-1 text-lg font-semibold text-[#166534]">
-                      {formatNumber(serviceHealth.totalSuccess)}
+                    <p className="mt-1 text-xs text-[var(--text-secondary)]">
+                      最近 7 天累计 {formatNumber(serviceHealth.totalSuccess + serviceHealth.totalFailure)} 次请求
                     </p>
                   </div>
-                  <div className="min-w-[140px] rounded-lg border border-[#fecaca] bg-[#fef2f2] px-4 py-3">
-                    <p className="text-xs text-[#b91c1c]">失败请求</p>
-                    <p className="mt-1 text-lg font-semibold text-[#b91c1c]">
-                      {formatNumber(serviceHealth.totalFailure)}
+                  <div className="min-w-[148px] rounded-2xl border border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-3 shadow-[var(--shadow-soft)]">
+                    <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--text-tertiary)]">活跃窗口</p>
+                    <p className="mt-2 text-lg font-semibold text-[var(--text-primary)]">
+                      {formatNumber(serviceHealth.activeWindowCount)}
+                    </p>
+                    <p className="mt-1 text-xs text-[var(--text-secondary)]">
+                      其中 {formatNumber(serviceHealth.strongWindowCount)} 格表现稳定
+                    </p>
+                  </div>
+                  <div className="min-w-[148px] rounded-2xl border border-[var(--border-color)] bg-[var(--bg-secondary)] px-4 py-3 shadow-[var(--shadow-soft)]">
+                    <p className="text-[11px] uppercase tracking-[0.16em] text-[var(--text-tertiary)]">关注窗口</p>
+                    <p className="mt-2 text-lg font-semibold text-[var(--text-primary)]">
+                      {formatNumber(serviceHealth.watchWindowCount)}
+                    </p>
+                    <p className="mt-1 text-xs text-[var(--text-secondary)]">
+                      失败请求 {formatNumber(serviceHealth.totalFailure)} 次
                     </p>
                   </div>
                 </div>
               </div>
               <div className="overflow-x-auto pb-1">
-                <div className="min-w-[1120px]">
+                <div className="min-w-[840px]">
                   <div className="space-y-2">
                     {serviceHealth.dayRows.map((row) => (
                       <div key={row.key} className="grid grid-cols-[52px_minmax(0,1fr)] items-center gap-3">
-                        <div className="text-xs text-[#6e6e80] tabular-nums">{row.label}</div>
+                        <div className="text-xs text-[var(--text-secondary)] tabular-nums">{row.label}</div>
                         <div
-                          className="grid gap-1"
+                          className="grid gap-[3px]"
                           style={{ gridTemplateColumns: `repeat(${SERVICE_HEALTH_COLS}, minmax(0, 1fr))` }}
                         >
                           {row.blocks.map((block) => (
                             <div
                               key={block.key}
                               title={block.title}
-                              className={`aspect-square w-full rounded-[3px] transition-transform duration-150 hover:scale-110 ${
-                                block.total === 0 ? 'border border-[#e2e8f0]' : ''
-                              }`}
-                              style={{ backgroundColor: block.total === 0 ? 'transparent' : block.color }}
+                              className="aspect-square w-full rounded-[4px] transition-transform duration-150 hover:-translate-y-px hover:scale-[1.06]"
+                              style={{
+                                backgroundColor: serviceHealthPalette.fills[block.level],
+                                border: `1px solid ${serviceHealthPalette.borders[block.level]}`,
+                              }}
                             />
                           ))}
                         </div>
@@ -1239,7 +1291,7 @@ function App({ openCodeEnabled }) {
                   <div className="grid grid-cols-[52px_minmax(0,1fr)] gap-3 mt-3">
                     <div />
                     <div
-                      className="grid text-[11px] text-[#94a3b8]"
+                      className="grid text-[11px] text-[var(--text-tertiary)]"
                       style={{ gridTemplateColumns: 'repeat(5, minmax(0, 1fr))' }}
                     >
                       <span className="text-left">00:00</span>
@@ -1252,26 +1304,24 @@ function App({ openCodeEnabled }) {
                 </div>
               </div>
 
-              <div className="flex flex-wrap items-center gap-4 mt-4 text-xs text-[#6e6e80]">
-                <span>图例</span>
-                <span className="inline-flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-[3px] border border-[#e2e8f0] bg-[#f8fafc]" />
-                  空闲
-                </span>
-                <span className="inline-flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-[3px] bg-[#ef4444]" />
-                  失败较多
-                </span>
-                <span className="inline-flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-[3px] bg-[#f59e0b]" />
-                  部分失败
-                </span>
-                <span className="inline-flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-[3px] bg-[#22c55e]" />
-                  健康
-                </span>
+              <div className="mt-4 flex flex-wrap items-center justify-between gap-3 text-xs text-[var(--text-secondary)]">
+                <div className="inline-flex items-center gap-2">
+                  <span>较弱</span>
+                  {serviceHealthPalette.fills.map((fill, level) => (
+                    <span
+                      key={`health-legend-${SERVICE_HEALTH_ACTIVITY_LABELS[level]}`}
+                      title={SERVICE_HEALTH_ACTIVITY_LABELS[level]}
+                      className="h-3.5 w-3.5 rounded-[4px]"
+                      style={{
+                        backgroundColor: fill,
+                        border: `1px solid ${serviceHealthPalette.borders[level]}`,
+                      }}
+                    />
+                  ))}
+                  <span>更稳</span>
+                </div>
                 {!hasServiceHealthData && (
-                  <span className="text-[#94a3b8]">最近 7 天暂无请求，当前全部显示为空闲窗口</span>
+                  <span className="text-[var(--text-tertiary)]">最近 7 天暂无请求，当前全部显示为空闲窗口</span>
                 )}
               </div>
             </div>
@@ -1298,8 +1348,8 @@ function App({ openCodeEnabled }) {
             </div>
 
             {activeTab === 'requests' && (
-              <div className="border border-[#e5e5e5] rounded-xl overflow-hidden">
-                <div className="flex items-center justify-between gap-3 border-b border-[#e5e5e5] bg-[#fafafa] px-4 py-3">
+              <div className="table-divider-soft border rounded-xl overflow-hidden">
+                <div className="table-divider-soft flex items-center justify-between gap-3 border-b bg-[#fafafa] px-4 py-3">
                   <p className="text-sm text-[#6e6e80]">
                     共 {formatNumber(requestDetails.length)} 条请求记录
                   </p>
@@ -1308,7 +1358,7 @@ function App({ openCodeEnabled }) {
                     <select
                       value={requestsPerPage}
                       onChange={(event) => setRequestsPerPage(Number(event.target.value) || DEFAULT_REQUESTS_PER_PAGE)}
-                      className="rounded-md border border-[#e5e5e5] bg-white px-2 py-1 text-sm text-[#0d0d0d] focus:outline-none focus:border-[#0d0d0d]"
+                      className="field-select rounded-md px-2 py-1 text-sm"
                     >
                       {REQUESTS_PER_PAGE_OPTIONS.map((option) => (
                         <option key={option} value={option}>
@@ -1321,7 +1371,7 @@ function App({ openCodeEnabled }) {
                 </div>
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[1280px]">
-                    <thead className="bg-[#f7f7f8] border-b border-[#e5e5e5]">
+                    <thead className="table-divider-soft bg-[#f7f7f8] border-b">
                       <tr>
                         <th className="text-left px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">时间</th>
                         <th className="text-left px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">API</th>
@@ -1336,7 +1386,7 @@ function App({ openCodeEnabled }) {
                         <th className="text-center px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">状态</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-[#e5e5e5]">
+                    <tbody>
                       {requestDetails.length === 0 ? (
                         <tr>
                           <td colSpan={11} className="px-4 py-12 text-center text-[#6e6e80]">暂无请求记录</td>
@@ -1346,7 +1396,7 @@ function App({ openCodeEnabled }) {
                           const sourceInfo = resolveSourceInfo(request, keyProviderCache)
 
                           return (
-                            <tr key={request.id} className="hover:bg-[#f7f7f8] transition-colors">
+                            <tr key={request.id} className="table-row-divider hover:bg-[#f7f7f8] transition-colors">
                               <td className="px-4 py-3">
                                 <p className="text-sm font-medium text-[#0d0d0d]">{formatTime(request.timestamp)}</p>
                                 <p className="text-xs text-[#6e6e80]">{formatRelativeTime(request.timestamp)}</p>
@@ -1398,7 +1448,7 @@ function App({ openCodeEnabled }) {
                   </table>
                 </div>
                 {requestDetails.length > 0 && (
-                  <div className="flex items-center justify-between px-4 py-3 border-t border-[#e5e5e5] bg-white">
+                  <div className="table-divider-soft flex items-center justify-between px-4 py-3 border-t bg-white">
                     <p className="text-xs text-[#6e6e80]">
                       第 {requestPage} / {totalRequestPages} 页 · 共 {requestDetails.length} 条
                     </p>
@@ -1455,7 +1505,7 @@ function App({ openCodeEnabled }) {
                               <div className="flex items-center gap-2">
                                 <span className="text-sm font-medium text-[#0d0d0d]">{credential.displayName}</span>
                                 {credential.type && (
-                                  <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-[#e5e5e5] text-[#6e6e80] uppercase">
+                                  <span className="inline-flex items-center rounded-full border border-[var(--border-color)] bg-[var(--bg-secondary)] px-1.5 py-0.5 text-[10px] font-medium uppercase text-[var(--text-secondary)]">
                                     {credential.type}
                                   </span>
                                 )}
@@ -1713,7 +1763,7 @@ function App({ openCodeEnabled }) {
                     <select
                       value={selectedModel}
                       onChange={(event) => handleSelectPricingModel(event.target.value)}
-                      className="w-full px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0d0d0d]"
+                      className="field-select w-full text-sm"
                     >
                       <option value="">选择模型...</option>
                       {availableModels.map((model) => (
@@ -1731,7 +1781,7 @@ function App({ openCodeEnabled }) {
                       value={promptPrice}
                       onChange={(event) => setPromptPrice(event.target.value)}
                       placeholder="0.0000"
-                      className="w-full px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0d0d0d]"
+                      className="field-input text-sm"
                     />
                   </div>
                   <div>
@@ -1742,7 +1792,7 @@ function App({ openCodeEnabled }) {
                       value={completionPrice}
                       onChange={(event) => setCompletionPrice(event.target.value)}
                       placeholder="0.0000"
-                      className="w-full px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0d0d0d]"
+                      className="field-input text-sm"
                     />
                   </div>
                   <div>
@@ -1753,7 +1803,7 @@ function App({ openCodeEnabled }) {
                       value={cachePrice}
                       onChange={(event) => setCachePrice(event.target.value)}
                       placeholder="默认同 Prompt"
-                      className="w-full px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0d0d0d]"
+                      className="field-input text-sm"
                     />
                   </div>
                   <button

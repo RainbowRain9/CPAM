@@ -14,6 +14,7 @@
   --bg-overlay: rgba(0, 0, 0, 0.58);
   --border-color: rgba(255, 255, 255, 0.12);
   --border-strong: rgba(255, 255, 255, 0.18);
+  --divider-soft: rgba(255, 255, 255, 0.06);
   --text-primary: #f8f8f4;
   --text-secondary: rgba(255, 255, 255, 0.72);
   --text-tertiary: rgba(255, 255, 255, 0.5);
@@ -45,6 +46,7 @@ html[data-theme="light"] {
   --bg-overlay: rgba(227, 227, 221, 0.62);
   --border-color: rgba(17, 17, 17, 0.08);
   --border-strong: rgba(17, 17, 17, 0.15);
+  --divider-soft: rgba(17, 17, 17, 0.07);
   --text-primary: #121212;
   --text-secondary: rgba(18, 18, 18, 0.68);
   --text-tertiary: rgba(18, 18, 18, 0.48);
@@ -168,6 +170,32 @@ textarea::placeholder {
   background: var(--bg-tertiary);
 }
 
+.field-select {
+  border-radius: 1rem;
+  border: 1px solid var(--border-color);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  padding: 0.75rem 1rem;
+  transition:
+    border-color 140ms ease,
+    background-color 140ms ease,
+    transform 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.field-select:focus {
+  outline: none;
+  border-color: var(--border-strong);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+  background: var(--bg-tertiary);
+}
+
+.field-select option,
+.legacy-surface select option {
+  background: var(--bg-card-strong) !important;
+  color: var(--text-primary) !important;
+}
+
 .field-label {
   display: block;
   margin-bottom: 0.5rem;
@@ -207,6 +235,18 @@ textarea::placeholder {
 
 .table-divider {
   border-color: var(--border-color);
+}
+
+.table-divider-soft {
+  border-color: var(--divider-soft) !important;
+}
+
+.table-row-divider {
+  border-bottom: 1px solid var(--divider-soft);
+}
+
+.table-row-divider:last-child {
+  border-bottom: 0;
 }
 
 .modal-backdrop {

@@ -1,24 +1,58 @@
-import React, { useState, useEffect } from 'react'
-import ReactDOM from 'react-dom/client'
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import App from './App.jsx'
-import SetupPage from './pages/SetupPage.jsx'
-import CodexPage from './pages/CodexPage.jsx'
-import OpenCodePage from './pages/OpenCodePage.jsx'
+import { Suspense, lazy, useEffect, useMemo, useState } from 'react'
+import { HashRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { apiFetch, clearStoredAppAuth, subscribeToAuthChanges } from './auth.js'
-import './index.css'
+import { I18nProvider } from './i18n/I18nProvider'
+import { useI18n } from './i18n/useI18n'
+import { ActionButton, AppShell } from './components/ui'
+import { ThemeProvider } from './theme/ThemeProvider'
 
-function Root() {
-  const [authState, setAuthState] = useState({
+const DashboardPage = lazy(() => import('./App'))
+const SetupPage = lazy(() => import('./pages/SetupPage'))
+const CodexPage = lazy(() => import('./pages/CodexPage'))
+const OpenCodePage = lazy(() => import('./pages/OpenCodePage'))
+
+type AuthState = {
+  checked: boolean
+  authenticated: boolean
+  loginRequired: boolean
+  blocked: boolean
+  message: string
+}
+
+type SettingsState = {
+  cliProxyUrl: string
+  syncInterval: number
+  openCodeConfigPath: string
+}
+
+function LoadingScreen() {
+  const { t } = useI18n()
+
+  return (
+    <AppShell showNav={false} subduedParticles>
+      <div className="flex min-h-[72vh] items-center justify-center">
+        <div className="surface-panel flex min-w-[220px] flex-col items-center gap-4 rounded-[28px] px-8 py-10 text-center">
+          <div className="h-10 w-10 animate-spin rounded-full border-2 border-[var(--border-color)] border-t-[var(--text-primary)]" />
+          <p className="text-sm muted-text">{t('Loading...')}</p>
+        </div>
+      </div>
+    </AppShell>
+  )
+}
+
+function RootContent() {
+  const [authState, setAuthState] = useState<AuthState>({
     checked: false,
     authenticated: false,
     loginRequired: false,
     blocked: false,
     message: '',
   })
-  const [configured, setConfigured] = useState(null)
+  const [configured, setConfigured] = useState<boolean | null>(null)
   const [showSetup, setShowSetup] = useState(false)
-  const [currentSettings, setCurrentSettings] = useState(null)
+  const [currentSettings, setCurrentSettings] = useState<SettingsState | null>(null)
+  const { t } = useI18n()
+
   const waitingForSettings =
     authState.checked &&
     !authState.blocked &&
@@ -74,7 +108,7 @@ function Root() {
         setCurrentSettings({
           cliProxyUrl: data.cliProxyUrl,
           syncInterval: data.syncInterval,
-          openCodeConfigPath: data.openCodeConfigPath || ''
+          openCodeConfigPath: data.openCodeConfigPath || '',
         })
       } else {
         setCurrentSettings(null)
@@ -111,61 +145,62 @@ function Root() {
     return unsubscribe
   }, [])
 
+  const footer = useMemo(() => (
+    <div className="px-2 pb-4 text-center">
+      <ActionButton size="sm" variant="ghost" onClick={() => setShowSetup(true)}>
+        {t('Open setup')}
+      </ActionButton>
+    </div>
+  ), [t])
+
   if (!authState.checked || waitingForSettings) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-white">
-        <div className="w-8 h-8 border-2 border-[#e5e5e5] border-t-[#0d0d0d] rounded-full animate-spin"></div>
-      </div>
-    )
+    return <LoadingScreen />
   }
 
   if (authState.blocked || (authState.loginRequired && !authState.authenticated) || !configured || showSetup) {
     return (
-      <SetupPage
-        initialSettings={currentSettings}
-        authRequired={authState.loginRequired}
-        authenticated={authState.authenticated}
-        blocked={authState.blocked}
-        blockedMessage={authState.message}
-        onComplete={async () => {
-          setConfigured(true)
-          setShowSetup(false)
-          await fetchSettings()
-        }}
-      />
+      <Suspense fallback={<LoadingScreen />}>
+        <SetupPage
+          initialSettings={currentSettings}
+          authRequired={authState.loginRequired}
+          authenticated={authState.authenticated}
+          blocked={authState.blocked}
+          blockedMessage={authState.message}
+          onComplete={async () => {
+            setConfigured(true)
+            setShowSetup(false)
+            await fetchSettings()
+          }}
+        />
+      </Suspense>
     )
   }
 
   return (
-    <BrowserRouter>
-      <div className="min-h-screen flex flex-col">
-        <div className="flex-1">
+    <HashRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <div className="min-h-screen">
+        <Suspense fallback={<LoadingScreen />}>
           <Routes>
-            <Route path="/" element={<App openCodeEnabled={!!currentSettings?.openCodeConfigPath} />} />
-            <Route path="/codex" element={<CodexPage />} />
+            <Route path="/" element={<DashboardPage openCodeEnabled={!!currentSettings?.openCodeConfigPath} />} />
+            <Route path="/codex" element={<CodexPage openCodeEnabled={!!currentSettings?.openCodeConfigPath} />} />
             {currentSettings?.openCodeConfigPath && (
-              <Route path="/opencode" element={<OpenCodePage />} />
+              <Route path="/opencode" element={<OpenCodePage openCodeEnabled />} />
             )}
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
-        </div>
-        <footer className="py-4 text-center">
-          <div className="flex items-center justify-center">
-            <button 
-              onClick={() => setShowSetup(true)}
-              className="text-xs text-[#acacac] hover:text-[#6e6e80] transition-colors"
-            >
-              重新设置
-            </button>
-          </div>
-        </footer>
+        </Suspense>
+        {footer}
       </div>
-    </BrowserRouter>
+    </HashRouter>
   )
 }
 
-ReactDOM.createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
-    <Root />
-  </React.StrictMode>,
-)
+export function RootApp() {
+  return (
+    <ThemeProvider>
+      <I18nProvider>
+        <RootContent />
+      </I18nProvider>
+    </ThemeProvider>
+  )
+}

@@ -1,6 +1,8 @@
-import { useState, useEffect } from 'react'
-import { Link } from 'react-router-dom'
+import { useEffect, useMemo, useState } from 'react'
 import { apiFetch } from '../auth.js'
+import { ActionButton, AppShell, InlineIcon, PageHero } from '../components/ui'
+import { useI18n } from '../i18n/useI18n'
+import { buildPrimaryNav } from '../navigation'
 
 const MODALITY_OPTIONS = ['text', 'image', 'pdf', 'audio', 'video']
 
@@ -27,7 +29,7 @@ const CATEGORY_DESC = {
   'writing': '文档与写作任务',
 }
 
-function OpenCodePage() {
+function OpenCodePage({ openCodeEnabled = true }) {
   const [config, setConfig] = useState(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -48,6 +50,8 @@ function OpenCodePage() {
   const [ohMyNewCat, setOhMyNewCat] = useState({ name: '', model: '', variant: '' })
   const [showAddAgent, setShowAddAgent] = useState(false)
   const [showAddCat, setShowAddCat] = useState(false)
+  const { t } = useI18n()
+  const navItems = useMemo(() => buildPrimaryNav(t, openCodeEnabled), [openCodeEnabled, t])
 
   useEffect(() => {
     fetchConfig()
@@ -231,41 +235,39 @@ function OpenCodePage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-white">
-        <div className="w-8 h-8 border-2 border-[#e5e5e5] border-t-[#0d0d0d] rounded-full animate-spin"></div>
-      </div>
+      <AppShell navItems={navItems} subduedParticles>
+        <div className="flex min-h-[72vh] items-center justify-center">
+          <div className="surface-panel flex flex-col items-center gap-4 rounded-[28px] px-8 py-10">
+            <div className="h-10 w-10 animate-spin rounded-full border-2 border-[var(--border-color)] border-t-[var(--text-primary)]" />
+            <p className="text-sm muted-text">{t('Loading...')}</p>
+          </div>
+        </div>
+      </AppShell>
     )
   }
 
   const providers = config?.provider ? Object.entries(config.provider) : []
 
   return (
-    <div className="min-h-screen pt-10 pb-20 px-6 bg-white">
-      <div className="max-w-5xl mx-auto">
-        {/* 头部 */}
-        <div className="mb-8">
-          <Link to="/" className="inline-flex items-center gap-2 text-sm text-[#6e6e80] hover:text-[#0d0d0d] mb-4 transition-colors">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-            </svg>
-            返回主页
-          </Link>
-          <div className="flex items-center justify-between">
-            <div>
-              <h1 className="text-3xl font-semibold text-[#0d0d0d]">OpenCode 配置</h1>
-              <p className="text-[#6e6e80] mt-2">管理提供商和模型配置</p>
-            </div>
-            <button
-              onClick={() => setShowAddProvider(true)}
-              className="px-4 py-2 text-sm font-medium text-white bg-[#0d0d0d] rounded-lg hover:bg-[#2d2d2d] transition-colors inline-flex items-center gap-2"
-            >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-              </svg>
-              添加提供商
-            </button>
-          </div>
-        </div>
+    <AppShell navItems={navItems} subduedParticles>
+      <div className="legacy-surface space-y-6">
+        <PageHero
+          eyebrow={t('OpenCode')}
+          title={t('Shape providers, models, and orchestration presets')}
+          subtitle={t('Tune provider endpoints, model capabilities, and Oh My OpenCode presets inside the same shell that holds usage and CodeX operations.')}
+          actions={(
+            <ActionButton onClick={() => setShowAddProvider(true)} variant="primary" icon={<InlineIcon name="plus" />}>
+              {t('Add provider')}
+            </ActionButton>
+          )}
+          meta={(
+            <>
+              <span className="chip">{t('Providers')}: {providers.length}</span>
+              {ohMyConfig ? <span className="chip">Oh My: {Object.keys(ohMyConfig.agents || {}).length + Object.keys(ohMyConfig.categories || {}).length}</span> : null}
+              {saving ? <span className="chip">{t('Saving...')}</span> : null}
+            </>
+          )}
+        />
 
         {/* 状态提示 */}
         {error && (
@@ -711,7 +713,7 @@ function OpenCodePage() {
           </div>
         )}
       </div>
-    </div>
+    </AppShell>
   )
 }
 

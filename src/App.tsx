@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   CartesianGrid,
   Line,
@@ -10,6 +9,9 @@ import {
   YAxis,
 } from 'recharts'
 import { apiFetch, createApiEventSource } from './auth.js'
+import { ActionButton, AppShell, PageHero, InlineIcon } from './components/ui'
+import { useI18n } from './i18n/useI18n'
+import { buildPrimaryNav } from './navigation'
 
 const DEFAULT_REQUESTS_PER_PAGE = 10
 const REQUESTS_PER_PAGE_OPTIONS = [10, 20, 50, 100]
@@ -782,6 +784,7 @@ function OverviewCard({ title, value, meta = null, valueClassName = 'text-[#0d0d
 
 function App({ openCodeEnabled }) {
   const pricingSeededRef = useRef(Object.keys(INITIAL_LOCAL_MODEL_PRICING).length > 0)
+  const { t } = useI18n()
 
   const [usage, setUsage] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -802,6 +805,7 @@ function App({ openCodeEnabled }) {
   const [syncing, setSyncing] = useState(false)
   const [syncMessage, setSyncMessage] = useState('')
   const [syncError, setSyncError] = useState('')
+  const navItems = useMemo(() => buildPrimaryNav(t, openCodeEnabled), [openCodeEnabled, t])
 
   const fetchUsage = async () => {
     try {
@@ -965,60 +969,39 @@ function App({ openCodeEnabled }) {
   }, [activeTab, requestDetails.length, requestsPerPage])
 
   return (
-    <div className="min-h-screen pt-10 pb-20 px-6 bg-white">
-      <div className="max-w-7xl mx-auto">
-        <div className="flex justify-end gap-3 mb-8">
-          <Link
-            to="/codex"
-            className="px-4 py-2 text-sm font-medium text-[#0d0d0d] border border-[#e5e5e5] rounded-lg hover:bg-[#f7f7f8] transition-colors inline-flex items-center gap-2"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z" />
-            </svg>
-            CodeX 管理
-          </Link>
-          {openCodeEnabled && (
-            <Link
-              to="/opencode"
-              className="px-4 py-2 text-sm font-medium text-[#0d0d0d] border border-[#e5e5e5] rounded-lg hover:bg-[#f7f7f8] transition-colors inline-flex items-center gap-2"
+    <AppShell navItems={navItems} subduedParticles>
+      <div className="legacy-surface space-y-6">
+        <PageHero
+          eyebrow={t('Overview')}
+          title={t('Usage intelligence in a quieter shell')}
+          subtitle={t('Track request trends, service health, API and model distribution, and browser-only price estimates from one monochrome dashboard.')}
+          actions={(
+            <ActionButton
+              onClick={handleManualSync}
+              disabled={syncing}
+              variant="primary"
+              icon={<InlineIcon name="refresh" className={syncing ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />}
+              loading={syncing}
             >
-              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 6h16M4 12h16M4 18h7" />
-              </svg>
-              OpenCode
-            </Link>
+              {syncing ? t('Syncing...') : t('Manual sync')}
+            </ActionButton>
           )}
-        </div>
+          meta={(
+            <>
+              <span className="chip">{t('Last updated')}: {formatTime(lastExport)}</span>
+              <span className="chip">{t('Active tab')}: {activeTab}</span>
+              <span className="chip">{t('Requests')}: {formatNumber(overviewStats.totalRequests)}</span>
+            </>
+          )}
+        />
 
-        <div className="mb-10">
-          <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
-            <div>
-              <h1 className="text-3xl font-semibold text-[#0d0d0d] mb-2">使用统计</h1>
-              <p className="text-[#6e6e80]">
-                按小时与按天查看请求趋势、凭证/API/模型分布、服务健康监测和费用估算 · 最后更新: {formatTime(lastExport)}
-              </p>
-            </div>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={handleManualSync}
-                disabled={syncing}
-                className="px-4 py-2 text-sm font-medium text-white bg-[#0d0d0d] rounded-lg hover:bg-[#2d2d2d] disabled:opacity-50 transition-colors inline-flex items-center gap-2"
-              >
-                <svg className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
-                </svg>
-                {syncing ? '同步中...' : '手动同步'}
-              </button>
-            </div>
-          </div>
-          {syncMessage && <p className="text-sm text-[#10a37f] mt-3">{syncMessage}</p>}
-          {syncError && <p className="text-sm text-[#ef4444] mt-3">{syncError}</p>}
-        </div>
+        {syncMessage && <p className="text-sm text-[var(--success)]">{syncMessage}</p>}
+        {syncError && <p className="text-sm text-[var(--danger)]">{syncError}</p>}
 
         {loading && (
-          <div className="text-center py-20">
-            <div className="inline-block w-8 h-8 border-2 border-[#e5e5e5] border-t-[#0d0d0d] rounded-full animate-spin"></div>
-            <p className="mt-4 text-[#6e6e80]">加载中...</p>
+          <div className="surface-panel flex min-h-[260px] flex-col items-center justify-center rounded-[32px] text-center">
+            <div className="h-10 w-10 animate-spin rounded-full border-2 border-[var(--border-color)] border-t-[var(--text-primary)]"></div>
+            <p className="mt-4 text-sm muted-text">{t('Loading...')}</p>
           </div>
         )}
 
@@ -1801,7 +1784,7 @@ function App({ openCodeEnabled }) {
           </>
         )}
       </div>
-    </div>
+    </AppShell>
   )
 }
 

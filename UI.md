@@ -10,7 +10,7 @@
 
 <context>
 
-当前项目是 **CLI Proxy API Management Center**，前端位于 `Cli-Proxy-API-Management-Center/`，技术栈为 **React 19 + TypeScript + Vite + Tailwind + SCSS Modules**，路由为 **HashRouter**。
+前端位于 src/，技术栈为 **React 19 + TypeScript + Vite + Tailwind + SCSS Modules**，路由为 **HashRouter**。
 
 设计必须精致、极简，并严格采用单色（黑/白）风格，深度借鉴 iOS 设计语言以及“antigravity.google”的美学风格。
 

@@ -66,7 +66,7 @@ http://localhost:8317
 ```bash
 cd ~/Code/cli-proxy-API-Center
 chmod +x scripts/*.sh
-./scripts/install-systemd.sh
+sudo ./scripts/install-systemd.sh
 ```
 
 常用命令：

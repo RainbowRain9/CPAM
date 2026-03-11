@@ -8,6 +8,7 @@ const usageDb = require('./db');
 
 const app = express();
 const PORT = Number(process.env.PORT || 7940);
+const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
 const DEV_MODE = process.env.NODE_ENV !== 'production' && !fs.existsSync(path.join(__dirname, '..', 'dist', 'index.html'));
 
 // usage 实时更新推送（SSE）
@@ -1319,9 +1320,9 @@ app.put('/api/opencode/oh-my', (req, res) => {
 
 // 开发模式：代理到 Vite 开发服务器
 if (DEV_MODE) {
-  console.log('开发模式：代理前端请求到 Vite (localhost:5173)');
+  console.log(`开发模式：代理前端请求到 Vite (${VITE_DEV_SERVER_URL})`);
   app.use('/', createProxyMiddleware({
-    target: 'http://localhost:5173',
+    target: VITE_DEV_SERVER_URL,
     changeOrigin: true,
     ws: true, // 支持 WebSocket (HMR)
     filter: (req) => !req.path.startsWith('/api')
@@ -1333,10 +1334,22 @@ if (DEV_MODE) {
   });
 }
 
-app.listen(PORT, () => {
+const server = app.listen(PORT);
+
+server.on('error', (error) => {
+  if (error?.code === 'EADDRINUSE') {
+    console.error(`API Center 启动失败：端口 ${PORT} 已被占用`);
+    process.exit(1);
+  }
+
+  console.error('API Center 启动失败:', error);
+  process.exit(1);
+});
+
+server.on('listening', () => {
   console.log(`API Center 服务运行在 http://localhost:${PORT}`);
   if (DEV_MODE) {
-    console.log('开发模式：请先运行 npm run dev 启动 Vite，然后访问 http://localhost:7940');
+    console.log(`开发模式：请先运行 npm run dev 启动 Vite，然后访问 http://localhost:${PORT}`);
   }
   const settings = loadSettings();
   if (settings) {

@@ -4,9 +4,9 @@
   "description": "API Center 管理工具",
   "main": "server/server.js",
   "scripts": {
-    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "dev": "concurrently --kill-others-on-fail \"npm run server\" \"npm run client\"",
     "server": "node server/server.js",
-    "client": "vite",
+    "client": "vite --strictPort",
     "build": "vite build",
     "test": "vitest run",
     "start": "node server/server.js"

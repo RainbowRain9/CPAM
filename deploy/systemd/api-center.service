@@ -5,13 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/Code/cli-proxy-API-Center
-ExecStart=/root/Code/cli-proxy-API-Center/scripts/start-local.sh
+WorkingDirectory=__APP_DIR__
+ExecStart=__APP_DIR__/scripts/start-local.sh
 Restart=always
 RestartSec=5
 Environment=NODE_ENV=production
 Environment=PORT=7940
-User=root
+User=__RUN_USER__
 
 [Install]
 WantedBy=multi-user.target

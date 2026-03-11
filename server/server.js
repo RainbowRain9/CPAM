@@ -590,6 +590,112 @@ app.post('/api/codex/check', async (req, res) => {
   }
 });
 
+const CODEX_FIVE_HOUR_WINDOW_SECONDS = 5 * 60 * 60;
+const CODEX_WEEKLY_WINDOW_SECONDS = 7 * 24 * 60 * 60;
+
+function toFiniteNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function normalizeCodexQuotaWindow(window, source, fallbackDurationSeconds = null) {
+  if (!window || typeof window !== 'object') return null;
+
+  const usedPercentValue = toFiniteNumber(
+    window.used_percent ??
+    window.usedPercent ??
+    window.percent_used ??
+    window.percentUsed
+  );
+
+  if (usedPercentValue === null) {
+    return null;
+  }
+
+  const durationSeconds =
+    toFiniteNumber(
+      window.duration_seconds ??
+      window.durationSeconds ??
+      window.window_seconds ??
+      window.windowSeconds ??
+      window.window_size_seconds ??
+      window.windowSizeSeconds ??
+      window.interval_seconds ??
+      window.intervalSeconds
+    ) ?? fallbackDurationSeconds;
+
+  const resetAt = toFiniteNumber(window.reset_at ?? window.resetAt);
+  const usedPercent = Math.max(0, Math.min(100, usedPercentValue));
+
+  return {
+    source,
+    durationSeconds,
+    usedPercent,
+    remainingPercent: Math.max(0, Math.min(100, 100 - usedPercent)),
+    resetAt
+  };
+}
+
+function extractCodexQuotaWindows(rateLimit) {
+  const normalizedWindows = [];
+
+  if (rateLimit?.primary_window) {
+    const primaryWindow = normalizeCodexQuotaWindow(
+      rateLimit.primary_window,
+      'primary',
+      CODEX_FIVE_HOUR_WINDOW_SECONDS
+    );
+    if (primaryWindow) {
+      normalizedWindows.push(primaryWindow);
+    }
+  }
+
+  if (rateLimit?.secondary_window) {
+    const secondaryWindow = normalizeCodexQuotaWindow(
+      rateLimit.secondary_window,
+      'secondary',
+      CODEX_WEEKLY_WINDOW_SECONDS
+    );
+    if (secondaryWindow) {
+      normalizedWindows.push(secondaryWindow);
+    }
+  }
+
+  if (Array.isArray(rateLimit?.windows)) {
+    rateLimit.windows.forEach((window, index) => {
+      const normalizedWindow = normalizeCodexQuotaWindow(window, `windows[${index}]`);
+      if (normalizedWindow) {
+        normalizedWindows.push(normalizedWindow);
+      }
+    });
+  }
+
+  const sortedByDuration = [...normalizedWindows].sort((a, b) => {
+    const durationA = a.durationSeconds ?? Number.MAX_SAFE_INTEGER;
+    const durationB = b.durationSeconds ?? Number.MAX_SAFE_INTEGER;
+    return durationA - durationB;
+  });
+
+  const sortedByDurationDesc = [...sortedByDuration].reverse();
+
+  const fiveHourWindow =
+    normalizedWindows.find(window => window.durationSeconds === CODEX_FIVE_HOUR_WINDOW_SECONDS) ||
+    normalizedWindows.find(window => window.source === 'primary') ||
+    sortedByDuration[0] ||
+    null;
+
+  const weeklyWindow =
+    normalizedWindows.find(window => window.durationSeconds === CODEX_WEEKLY_WINDOW_SECONDS) ||
+    normalizedWindows.find(window => window.source === 'secondary') ||
+    sortedByDurationDesc.find(window => window !== fiveHourWindow) ||
+    null;
+
+  return {
+    fiveHourWindow,
+    weeklyWindow
+  };
+}
+
 // 检查单个CodeX账号配额
 async function probeCodexQuota(authIndex, chatgptAccountId) {
   const userAgent = 'codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal';
@@ -633,14 +739,14 @@ async function probeCodexQuota(authIndex, chatgptAccountId) {
         const usageData = typeof body === 'string' ? JSON.parse(body) : body;
         // rate_limit = 代码补全配额
         const rateLimit = usageData.rate_limit;
-        if (rateLimit?.primary_window) {
-          const usedPercent = rateLimit.primary_window.used_percent || 0;
-          const remainingPercent = 100 - usedPercent;
-          const resetAt = rateLimit.primary_window.reset_at;
+        const { fiveHourWindow, weeklyWindow } = extractCodexQuotaWindows(rateLimit);
+        if (fiveHourWindow || weeklyWindow) {
           return { 
-            completionQuota: Math.max(0, Math.min(100, remainingPercent)),
-            usedPercent,
-            resetAt,
+            completionQuota: fiveHourWindow?.remainingPercent,
+            usedPercent: fiveHourWindow?.usedPercent,
+            resetAt: fiveHourWindow?.resetAt,
+            fiveHourWindow,
+            weeklyWindow,
             statusCode 
           };
         }
@@ -692,13 +798,15 @@ app.post('/api/codex/quota', async (req, res) => {
           if (!authIndex) return null;
           
           const result = await probeCodexQuota(authIndex, chatgptAccountId);
-          if (result.completionQuota !== undefined) {
+          if (result.completionQuota !== undefined || result.fiveHourWindow || result.weeklyWindow) {
             return {
               authIndex,
               email: account.email || account.account,
               completionQuota: result.completionQuota,
               usedPercent: result.usedPercent,
-              resetAt: result.resetAt
+              resetAt: result.resetAt,
+              fiveHourWindow: result.fiveHourWindow || null,
+              weeklyWindow: result.weeklyWindow || null
             };
           }
           return null;

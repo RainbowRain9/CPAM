@@ -3,6 +3,107 @@ import { Link } from 'react-router-dom'
 
 const ITEMS_PER_PAGE = 12 // 3列 x 4行
 
+function formatQuotaResetAt(resetAt) {
+  if (!resetAt) return '未返回时间'
+
+  const date = new Date(resetAt * 1000)
+  if (Number.isNaN(date.getTime())) return '时间无效'
+
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  })
+}
+
+function getQuotaTone(percent) {
+  if (!Number.isFinite(percent)) {
+    return {
+      text: 'text-[#94a3b8]',
+      bar: 'bg-[#cbd5e1]',
+      border: 'border-[#e2e8f0]',
+      bg: 'bg-[#f8fafc]',
+    }
+  }
+
+  if (percent > 50) {
+    return {
+      text: 'text-[#15803d]',
+      bar: 'bg-[#10a37f]',
+      border: 'border-[#bbf7d0]',
+      bg: 'bg-[#f0fdf4]',
+    }
+  }
+
+  if (percent > 20) {
+    return {
+      text: 'text-[#b45309]',
+      bar: 'bg-[#f59e0b]',
+      border: 'border-[#fed7aa]',
+      bg: 'bg-[#fff7ed]',
+    }
+  }
+
+  return {
+    text: 'text-[#dc2626]',
+    bar: 'bg-[#ef4444]',
+    border: 'border-[#fecaca]',
+    bg: 'bg-[#fef2f2]',
+  }
+}
+
+function getLegacyQuotaWindow(account) {
+  if (account?.quota === undefined && account?.usedPercent === undefined && !account?.resetAt) {
+    return null
+  }
+
+  return {
+    remainingPercent: account.quota,
+    usedPercent: account.usedPercent,
+    resetAt: account.resetAt,
+  }
+}
+
+function getFiveHourQuotaWindow(account) {
+  return account?.fiveHourWindow || getLegacyQuotaWindow(account)
+}
+
+function getWeeklyQuotaWindow(account) {
+  return account?.weeklyWindow || null
+}
+
+function QuotaWindowCard({ title, windowData }) {
+  const remainingPercent = Number.isFinite(Number(windowData?.remainingPercent))
+    ? Math.max(0, Math.min(100, Number(windowData.remainingPercent)))
+    : null
+  const tone = getQuotaTone(remainingPercent)
+
+  return (
+    <div className={`rounded-lg border px-3 py-3 ${tone.border} ${tone.bg}`}>
+      <p className="text-[11px] text-[#6e6e80]">{title}</p>
+      <div className="flex items-end justify-between mt-1">
+        <span className={`text-lg font-semibold leading-none ${tone.text}`}>
+          {remainingPercent !== null ? `${Math.round(remainingPercent)}%` : '--'}
+        </span>
+        <span className="text-[10px] text-[#8e8ea0]">
+          {remainingPercent !== null ? '剩余' : '未检查'}
+        </span>
+      </div>
+      <div className="h-1.5 bg-white/80 rounded-full overflow-hidden mt-3">
+        <div
+          className={`h-full rounded-full transition-all ${tone.bar}`}
+          style={{ width: `${remainingPercent ?? 0}%` }}
+        />
+      </div>
+      <p className="text-[10px] text-[#8e8ea0] mt-2">
+        {windowData?.resetAt ? formatQuotaResetAt(windowData.resetAt) : '检查配额后显示'}
+      </p>
+    </div>
+  )
+}
+
 function CodexPage() {
   const [accounts, setAccounts] = useState([])
   const [loading, setLoading] = useState(true)
@@ -71,10 +172,14 @@ function CodexPage() {
     const now = Date.now() / 1000
     const thresholdSeconds = cleanThreshold.days * 24 * 60 * 60
     return accounts.filter(acc => {
-      if (acc.quota === undefined) return false // 未查配额的不处理
-      if (acc.quota > cleanThreshold.quota) return false // 配额高于阈值不清除
-      if (!acc.resetAt) return false
-      const resetInSeconds = acc.resetAt - now
+      const weeklyWindow = getWeeklyQuotaWindow(acc)
+      const weeklyQuota = weeklyWindow?.remainingPercent
+      const weeklyResetAt = weeklyWindow?.resetAt
+
+      if (!Number.isFinite(Number(weeklyQuota))) return false // 未查周限额的不处理
+      if (Number(weeklyQuota) > cleanThreshold.quota) return false // 配额高于阈值不清除
+      if (!weeklyResetAt) return false
+      const resetInSeconds = weeklyResetAt - now
       // 距离刷新时间大于阈值天数才清除（配额低且恢复慢）
       return resetInSeconds > thresholdSeconds
     })
@@ -166,7 +271,9 @@ function CodexPage() {
               ...acc, 
               quota: quota.completionQuota,
               usedPercent: quota.usedPercent,
-              resetAt: quota.resetAt
+              resetAt: quota.resetAt,
+              fiveHourWindow: quota.fiveHourWindow || null,
+              weeklyWindow: quota.weeklyWindow || null
             } : acc
           }))
         }
@@ -310,30 +417,23 @@ function CodexPage() {
                     )}
                   </div>
                   <div className="flex-1" />
-                  <div className="mt-3">
-                    <div className="flex items-center justify-between mb-2">
+                  <div className="mt-3 space-y-3">
+                    <div className="flex items-center justify-between">
                       <span className="text-xs text-[#6e6e80]">{account.planType || 'free'}</span>
-                      {account.quota !== undefined && (
-                        <span className="text-xs text-[#6e6e80]">
-                          剩余 {account.quota}%
-                        </span>
+                      {account.label && (
+                        <span className="text-[10px] text-[#8e8ea0]">{account.label}</span>
                       )}
                     </div>
-                    <div className="h-2 bg-[#e5e5e5] rounded-full overflow-hidden">
-                      {account.quota !== undefined ? (
-                        <div 
-                          className={`h-full rounded-full transition-all ${account.quota > 50 ? 'bg-[#10a37f]' : account.quota > 20 ? 'bg-[#f59e0b]' : 'bg-[#ef4444]'}`}
-                          style={{ width: `${account.quota}%` }}
-                        />
-                      ) : (
-                        <div className="h-full w-full bg-[#e5e5e5]" />
-                      )}
+                    <div className="grid grid-cols-2 gap-2">
+                      <QuotaWindowCard
+                        title="5 小时限额"
+                        windowData={getFiveHourQuotaWindow(account)}
+                      />
+                      <QuotaWindowCard
+                        title="周限额"
+                        windowData={getWeeklyQuotaWindow(account)}
+                      />
                     </div>
-                    {account.resetAt && (
-                      <p className="text-[10px] text-[#8e8ea0] mt-1">
-                        重置: {new Date(account.resetAt * 1000).toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}
-                      </p>
-                    )}
                   </div>
                 </div>
               ))}
@@ -443,12 +543,12 @@ function CodexPage() {
                   <span className="font-medium">{accounts.length}</span>
                 </div>
                 <div className="flex justify-between text-sm mt-1">
-                  <span className="text-[#6e6e80]">已查配额</span>
-                  <span className="font-medium">{accounts.filter(a => a.quota !== undefined).length}</span>
+                  <span className="text-[#6e6e80]">已查周限额</span>
+                  <span className="font-medium">{accounts.filter(a => getWeeklyQuotaWindow(a)).length}</span>
                 </div>
               </div>
 
-              <p className="text-sm text-[#6e6e80] mb-4">清除配额低且短期内不会恢复的账号：</p>
+              <p className="text-sm text-[#6e6e80] mb-4">按周限额清除配额低且短期内不会恢复的账号：</p>
               
               <div className="space-y-4 mb-6">
                 <div>

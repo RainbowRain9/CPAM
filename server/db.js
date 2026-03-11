@@ -98,7 +98,9 @@ const stmts = {
       SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failure_count,
       SUM(total_tokens) as total_tokens,
       SUM(input_tokens) as total_input_tokens,
-      SUM(output_tokens) as total_output_tokens
+      SUM(output_tokens) as total_output_tokens,
+      SUM(cached_tokens) as total_cached_tokens,
+      SUM(reasoning_tokens) as total_reasoning_tokens
     FROM usage_records
   `),
 
@@ -107,9 +109,13 @@ const stmts = {
     SELECT 
       model,
       COUNT(*) as requests,
+      SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_count,
+      SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failure_count,
       SUM(total_tokens) as total_tokens,
       SUM(input_tokens) as input_tokens,
       SUM(output_tokens) as output_tokens,
+      SUM(cached_tokens) as cached_tokens,
+      SUM(reasoning_tokens) as reasoning_tokens,
       MAX(request_time) as last_used
     FROM usage_records
     GROUP BY model
@@ -168,9 +174,13 @@ const stmts = {
       api_path,
       model,
       COUNT(*) as requests,
+      SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) as success_count,
+      SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) as failure_count,
       SUM(total_tokens) as total_tokens,
       SUM(input_tokens) as input_tokens,
-      SUM(output_tokens) as output_tokens
+      SUM(output_tokens) as output_tokens,
+      SUM(cached_tokens) as cached_tokens,
+      SUM(reasoning_tokens) as reasoning_tokens
     FROM usage_records
     GROUP BY api_path, model
     ORDER BY requests DESC
@@ -192,7 +202,7 @@ const stmts = {
     FROM usage_records
     WHERE api_path = ? AND model = ?
     ORDER BY request_time DESC
-    LIMIT 1000
+    LIMIT 5000
   `),
 
   // 同步状态
@@ -258,7 +268,17 @@ module.exports = {
     const apis = {};
     byApi.forEach(row => {
       if (!apis[row.api_path]) {
-        apis[row.api_path] = { models: {} };
+        apis[row.api_path] = {
+          total_requests: 0,
+          success_count: 0,
+          failure_count: 0,
+          total_tokens: 0,
+          input_tokens: 0,
+          output_tokens: 0,
+          cached_tokens: 0,
+          reasoning_tokens: 0,
+          models: {}
+        };
       }
       // 获取原始记录并转换为前端期望的格式
       const rawDetails = stmts.getModelDetails.all(row.api_path, row.model);
@@ -278,11 +298,25 @@ module.exports = {
       
       apis[row.api_path].models[row.model] = {
         requests: row.requests,
+        total_requests: row.requests,
+        success_count: row.success_count,
+        failure_count: row.failure_count,
         total_tokens: row.total_tokens,
         input_tokens: row.input_tokens,
         output_tokens: row.output_tokens,
+        cached_tokens: row.cached_tokens,
+        reasoning_tokens: row.reasoning_tokens,
         details: details
       };
+
+      apis[row.api_path].total_requests += row.requests || 0;
+      apis[row.api_path].success_count += row.success_count || 0;
+      apis[row.api_path].failure_count += row.failure_count || 0;
+      apis[row.api_path].total_tokens += row.total_tokens || 0;
+      apis[row.api_path].input_tokens += row.input_tokens || 0;
+      apis[row.api_path].output_tokens += row.output_tokens || 0;
+      apis[row.api_path].cached_tokens += row.cached_tokens || 0;
+      apis[row.api_path].reasoning_tokens += row.reasoning_tokens || 0;
     });
 
     return {
@@ -290,7 +324,24 @@ module.exports = {
       success_count: overview.success_count || 0,
       failure_count: overview.failure_count || 0,
       total_tokens: overview.total_tokens || 0,
+      total_input_tokens: overview.total_input_tokens || 0,
+      total_output_tokens: overview.total_output_tokens || 0,
+      total_cached_tokens: overview.total_cached_tokens || 0,
+      total_reasoning_tokens: overview.total_reasoning_tokens || 0,
       apis,
+      models_summary: byModel.map(row => ({
+        model: row.model,
+        requests: row.requests || 0,
+        total_requests: row.requests || 0,
+        success_count: row.success_count || 0,
+        failure_count: row.failure_count || 0,
+        total_tokens: row.total_tokens || 0,
+        input_tokens: row.input_tokens || 0,
+        output_tokens: row.output_tokens || 0,
+        cached_tokens: row.cached_tokens || 0,
+        reasoning_tokens: row.reasoning_tokens || 0,
+        last_used: row.last_used || null
+      })),
       requests_by_day: Object.fromEntries(requestsByDay.map(r => [r.day, r.count])),
       requests_by_hour: Object.fromEntries(requestsByHour.map(r => [r.hour, r.count])),
       tokens_by_day: Object.fromEntries(tokensByDay.map(r => [r.day, r.tokens])),

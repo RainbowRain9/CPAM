@@ -1,38 +1,715 @@
-import { useState, useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts'
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
+
+const REQUESTS_PER_PAGE = 50
+const RECENT_WINDOW_MINUTES = 30
+const LOCAL_MODEL_PRICING_KEY = 'api-center-local-model-pricing-v1'
+const SERVICE_HEALTH_ROWS = 7
+const SERVICE_HEALTH_COLS = 96
+const SERVICE_HEALTH_BLOCK_MS = 15 * 60 * 1000
+const SERVICE_HEALTH_COLOR_STOPS = [
+  { r: 239, g: 68, b: 68 },
+  { r: 245, g: 158, b: 11 },
+  { r: 34, g: 197, b: 94 },
+]
+
+function toSafeNumber(value) {
+  const num = Number(value)
+  return Number.isFinite(num) ? num : 0
+}
+
+function toNonNegativeNumber(value) {
+  return Math.max(0, toSafeNumber(value))
+}
+
+function formatNumber(value) {
+  return toSafeNumber(value).toLocaleString('zh-CN')
+}
+
+function formatTokens(value) {
+  const num = toNonNegativeNumber(value)
+  if (num === 0) return '0'
+  if (num >= 1000000) return `${(num / 1000000).toFixed(2)}M`
+  if (num >= 1000) return `${(num / 1000).toFixed(1)}K`
+  return num.toLocaleString('zh-CN')
+}
+
+function formatUsd(value) {
+  return `$${toSafeNumber(value).toFixed(4)}`
+}
+
+function formatPerMinute(value) {
+  const num = toSafeNumber(value)
+  if (num >= 1000) return `${(num / 1000).toFixed(1)}K`
+  if (num >= 100) return num.toFixed(0)
+  if (num >= 10) return num.toFixed(1)
+  return num.toFixed(2)
+}
+
+function formatTime(isoString) {
+  if (!isoString) return '-'
+  const date = new Date(isoString)
+  if (Number.isNaN(date.getTime())) return '-'
+  return date.toLocaleString('zh-CN')
+}
+
+function formatRelativeTime(isoString) {
+  if (!isoString) return '-'
+  const date = new Date(isoString)
+  if (Number.isNaN(date.getTime())) return '-'
+  const diff = Date.now() - date.getTime()
+  const minutes = Math.floor(diff / 60000)
+  const hours = Math.floor(diff / 3600000)
+  if (minutes < 1) return '刚刚'
+  if (minutes < 60) return `${minutes} 分钟前`
+  if (hours < 24) return `${hours} 小时前`
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+}
+
+function interpolateColor(from, to, ratio) {
+  const clampedRatio = Math.max(0, Math.min(1, ratio))
+  const r = Math.round(from.r + (to.r - from.r) * clampedRatio)
+  const g = Math.round(from.g + (to.g - from.g) * clampedRatio)
+  const b = Math.round(from.b + (to.b - from.b) * clampedRatio)
+  return `rgb(${r}, ${g}, ${b})`
+}
+
+function rateToHealthColor(rate) {
+  if (rate < 0) return '#f8fafc'
+  if (rate <= 0.5) {
+    return interpolateColor(
+      SERVICE_HEALTH_COLOR_STOPS[0],
+      SERVICE_HEALTH_COLOR_STOPS[1],
+      rate * 2
+    )
+  }
+
+  return interpolateColor(
+    SERVICE_HEALTH_COLOR_STOPS[1],
+    SERVICE_HEALTH_COLOR_STOPS[2],
+    (rate - 0.5) * 2
+  )
+}
+
+function formatHealthBlockTime(startTime, endTime) {
+  const start = new Date(startTime)
+  const end = new Date(endTime)
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return '-'
+
+  const startLabel = start.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+  const endLabel = end.toLocaleTimeString('zh-CN', {
+    hour: '2-digit',
+    minute: '2-digit',
+  })
+
+  return `${startLabel} - ${endLabel}`
+}
+
+function getCachedTokens(tokens = {}) {
+  return Math.max(
+    toNonNegativeNumber(tokens.cached_tokens),
+    toNonNegativeNumber(tokens.cache_tokens)
+  )
+}
+
+function getReasoningTokens(tokens = {}) {
+  return toNonNegativeNumber(tokens.reasoning_tokens)
+}
+
+function getInputTokens(tokens = {}) {
+  return toNonNegativeNumber(tokens.input_tokens)
+}
+
+function getOutputTokens(tokens = {}) {
+  return toNonNegativeNumber(tokens.output_tokens)
+}
+
+function getTotalTokens(tokens = {}) {
+  const total = toSafeNumber(tokens.total_tokens)
+  if (total > 0) return total
+  return getInputTokens(tokens) + getOutputTokens(tokens) + getCachedTokens(tokens) + getReasoningTokens(tokens)
+}
+
+function normalizeLocalPricingMap(rawValue) {
+  if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
+    return {}
+  }
+
+  const normalized = {}
+  Object.entries(rawValue).forEach(([model, value]) => {
+    if (!model || !value || typeof value !== 'object' || Array.isArray(value)) return
+
+    const promptPrice = toNonNegativeNumber(value.promptPrice ?? value.prompt ?? value.inputPrice)
+    const completionPrice = toNonNegativeNumber(value.completionPrice ?? value.completion ?? value.outputPrice)
+    const cacheRaw = value.cachePrice ?? value.cache ?? value.inputPrice ?? value.promptPrice ?? value.prompt
+    const cachePrice = toNonNegativeNumber(cacheRaw)
+
+    normalized[model] = {
+      promptPrice,
+      completionPrice,
+      cachePrice: cachePrice > 0 ? cachePrice : promptPrice,
+    }
+  })
+
+  return normalized
+}
+
+function loadLocalModelPricing() {
+  try {
+    if (typeof window === 'undefined') return {}
+    const raw = window.localStorage.getItem(LOCAL_MODEL_PRICING_KEY)
+    if (!raw) return {}
+    return normalizeLocalPricingMap(JSON.parse(raw))
+  } catch {
+    return {}
+  }
+}
+
+function persistLocalModelPricing(pricing) {
+  try {
+    if (typeof window === 'undefined') return
+    window.localStorage.setItem(LOCAL_MODEL_PRICING_KEY, JSON.stringify(pricing))
+  } catch {
+    console.warn('保存本地模型价格失败')
+  }
+}
+
+function migrateServerPricing(serverPricing) {
+  return normalizeLocalPricingMap(serverPricing)
+}
+
+const INITIAL_LOCAL_MODEL_PRICING = loadLocalModelPricing()
+
+function calculateAggregateCost(modelName, inputTokens, outputTokens, cachedTokens, pricingMap) {
+  const pricing = pricingMap[modelName]
+  if (!pricing) return null
+
+  const promptTokens = Math.max(toNonNegativeNumber(inputTokens) - toNonNegativeNumber(cachedTokens), 0)
+  const promptCost = (promptTokens / 1000000) * toNonNegativeNumber(pricing.promptPrice)
+  const completionCost = (toNonNegativeNumber(outputTokens) / 1000000) * toNonNegativeNumber(pricing.completionPrice)
+  const cacheCost = (toNonNegativeNumber(cachedTokens) / 1000000) * toNonNegativeNumber(pricing.cachePrice)
+
+  return promptCost + completionCost + cacheCost
+}
+
+function buildRequestDetails(usage, pricingMap) {
+  const details = []
+
+  if (!usage?.apis) return details
+
+  Object.entries(usage.apis).forEach(([endpoint, api]) => {
+    if (!api?.models) return
+
+    Object.entries(api.models).forEach(([modelName, modelData]) => {
+      const modelDetails = Array.isArray(modelData?.details) ? modelData.details : []
+
+      modelDetails.forEach((detail, index) => {
+        const tokens = detail?.tokens || {}
+        const inputTokens = getInputTokens(tokens)
+        const outputTokens = getOutputTokens(tokens)
+        const cachedTokens = getCachedTokens(tokens)
+        const reasoningTokens = getReasoningTokens(tokens)
+        const totalTokens = getTotalTokens(tokens)
+        const cost = calculateAggregateCost(modelName, inputTokens, outputTokens, cachedTokens, pricingMap)
+        const timestampMs = Date.parse(detail?.timestamp || '')
+
+        details.push({
+          id: `${endpoint}-${modelName}-${detail?.timestamp || index}-${index}`,
+          endpoint,
+          model: modelName,
+          source: detail?.source || '',
+          authIndex: detail?.auth_index ?? '',
+          timestamp: detail?.timestamp || '',
+          timestampMs: Number.isNaN(timestampMs) ? 0 : timestampMs,
+          failed: detail?.failed === true,
+          inputTokens,
+          outputTokens,
+          cachedTokens,
+          reasoningTokens,
+          totalTokens,
+          cost,
+          hasPrice: Boolean(pricingMap[modelName]),
+        })
+      })
+    })
+  })
+
+  return details.sort((a, b) => b.timestampMs - a.timestampMs)
+}
+
+function buildOverviewStats(usage, requestDetails) {
+  let totalCost = 0
+  let fallbackInputTokens = 0
+  let fallbackOutputTokens = 0
+  let fallbackCachedTokens = 0
+  let fallbackReasoningTokens = 0
+
+  requestDetails.forEach((detail) => {
+    fallbackInputTokens += detail.inputTokens
+    fallbackOutputTokens += detail.outputTokens
+    fallbackCachedTokens += detail.cachedTokens
+    fallbackReasoningTokens += detail.reasoningTokens
+    if (detail.cost !== null) {
+      totalCost += detail.cost
+    }
+  })
+
+  return {
+    totalRequests: toNonNegativeNumber(usage?.total_requests),
+    successCount: toNonNegativeNumber(usage?.success_count),
+    failureCount: toNonNegativeNumber(usage?.failure_count),
+    totalTokens: toNonNegativeNumber(usage?.total_tokens),
+    totalInputTokens: toNonNegativeNumber(usage?.total_input_tokens) || fallbackInputTokens,
+    totalOutputTokens: toNonNegativeNumber(usage?.total_output_tokens) || fallbackOutputTokens,
+    totalCachedTokens: toNonNegativeNumber(usage?.total_cached_tokens) || fallbackCachedTokens,
+    totalReasoningTokens: toNonNegativeNumber(usage?.total_reasoning_tokens) || fallbackReasoningTokens,
+    totalCost,
+  }
+}
+
+function createHourlyBuckets(hours = 24) {
+  const current = new Date()
+  current.setMinutes(0, 0, 0)
+
+  const buckets = []
+  for (let offset = hours - 1; offset >= 0; offset -= 1) {
+    const bucketDate = new Date(current.getTime() - offset * 3600000)
+    buckets.push({
+      key: bucketDate.getTime(),
+      label: bucketDate.toLocaleString('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+      }),
+    })
+  }
+  return buckets
+}
+
+function createDailyBuckets(days = 30) {
+  const current = new Date()
+  current.setHours(0, 0, 0, 0)
+
+  const buckets = []
+  for (let offset = days - 1; offset >= 0; offset -= 1) {
+    const bucketDate = new Date(current)
+    bucketDate.setDate(bucketDate.getDate() - offset)
+    buckets.push({
+      key: bucketDate.getTime(),
+      label: bucketDate.toLocaleDateString('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+      }),
+      fullDate: bucketDate.toISOString().slice(0, 10),
+    })
+  }
+  return buckets
+}
+
+function buildTrendData(requestDetails, mode) {
+  const buckets = mode === 'hourly' ? createHourlyBuckets(24) : createDailyBuckets(30)
+  const rows = buckets.map((bucket) => ({
+    key: bucket.key,
+    label: bucket.label,
+    fullDate: bucket.fullDate || '',
+    requests: 0,
+    totalTokens: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cachedTokens: 0,
+    reasoningTokens: 0,
+    cost: 0,
+  }))
+
+  const rowIndexByKey = new Map(rows.map((row, index) => [row.key, index]))
+
+  requestDetails.forEach((detail) => {
+    if (!detail.timestampMs) return
+
+    const bucketDate = new Date(detail.timestampMs)
+    if (mode === 'hourly') {
+      bucketDate.setMinutes(0, 0, 0)
+    } else {
+      bucketDate.setHours(0, 0, 0, 0)
+    }
+
+    const rowIndex = rowIndexByKey.get(bucketDate.getTime())
+    if (rowIndex === undefined) return
+
+    const row = rows[rowIndex]
+    row.requests += 1
+    row.totalTokens += detail.totalTokens
+    row.inputTokens += detail.inputTokens
+    row.outputTokens += detail.outputTokens
+    row.cachedTokens += detail.cachedTokens
+    row.reasoningTokens += detail.reasoningTokens
+    if (detail.cost !== null) {
+      row.cost += detail.cost
+    }
+  })
+
+  return rows
+}
+
+function buildRecentWindowStats(requestDetails, windowMinutes = RECENT_WINDOW_MINUTES) {
+  const now = Date.now()
+  const windowStart = now - windowMinutes * 60 * 1000
+
+  let requestCount = 0
+  let tokenCount = 0
+
+  requestDetails.forEach((detail) => {
+    if (!detail.timestampMs || detail.timestampMs < windowStart || detail.timestampMs > now) return
+    requestCount += 1
+    tokenCount += detail.totalTokens
+  })
+
+  return {
+    requestCount,
+    tokenCount,
+    rpm: requestCount / windowMinutes,
+    tpm: tokenCount / windowMinutes,
+    windowMinutes,
+  }
+}
+
+function buildServiceHealthData(requestDetails) {
+  const blockCount = SERVICE_HEALTH_ROWS * SERVICE_HEALTH_COLS
+  const windowStartDate = new Date()
+  windowStartDate.setHours(0, 0, 0, 0)
+  windowStartDate.setDate(windowStartDate.getDate() - (SERVICE_HEALTH_ROWS - 1))
+
+  const windowStart = windowStartDate.getTime()
+  const windowEnd = windowStart + blockCount * SERVICE_HEALTH_BLOCK_MS
+  const blockStats = Array.from({ length: blockCount }, () => ({ success: 0, failure: 0 }))
+
+  let totalSuccess = 0
+  let totalFailure = 0
+
+  requestDetails.forEach((detail) => {
+    const timestampMs = detail.timestampMs
+    if (!timestampMs || timestampMs < windowStart || timestampMs >= windowEnd) return
+
+    const blockIndex = Math.floor((timestampMs - windowStart) / SERVICE_HEALTH_BLOCK_MS)
+    if (blockIndex < 0 || blockIndex >= blockCount) return
+
+    if (detail.failed) {
+      blockStats[blockIndex].failure += 1
+      totalFailure += 1
+      return
+    }
+
+    blockStats[blockIndex].success += 1
+    totalSuccess += 1
+  })
+
+  const blocks = blockStats.map((stat, index) => {
+    const total = stat.success + stat.failure
+    const startTime = windowStart + index * SERVICE_HEALTH_BLOCK_MS
+    const endTime = startTime + SERVICE_HEALTH_BLOCK_MS
+    const rate = total > 0 ? stat.success / total : -1
+    const timeRange = formatHealthBlockTime(startTime, endTime)
+
+    return {
+      key: startTime,
+      total,
+      success: stat.success,
+      failure: stat.failure,
+      rate,
+      color: rateToHealthColor(rate),
+      title: total > 0
+        ? `${timeRange} | 成功 ${stat.success} | 失败 ${stat.failure} | 成功率 ${(rate * 100).toFixed(1)}%`
+        : `${timeRange} | 无请求`,
+    }
+  })
+
+  const dayRows = Array.from({ length: SERVICE_HEALTH_ROWS }, (_, rowIndex) => {
+    const startIndex = rowIndex * SERVICE_HEALTH_COLS
+    const rowStartTime = windowStart + startIndex * SERVICE_HEALTH_BLOCK_MS
+
+    return {
+      key: rowStartTime,
+      label: new Date(rowStartTime).toLocaleDateString('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+      }),
+      blocks: blocks.slice(startIndex, startIndex + SERVICE_HEALTH_COLS),
+    }
+  })
+
+  const totalRequests = totalSuccess + totalFailure
+
+  return {
+    dayRows,
+    totalSuccess,
+    totalFailure,
+    successRate: totalRequests > 0 ? (totalSuccess / totalRequests) * 100 : 100,
+  }
+}
+
+function buildApiStats(usage, pricingMap) {
+  if (!usage?.apis) return []
+
+  return Object.entries(usage.apis)
+    .map(([endpoint, api]) => {
+      const modelRows = api?.models
+        ? Object.entries(api.models).map(([modelName, modelData]) => {
+            const requests = toNonNegativeNumber(modelData?.total_requests ?? modelData?.requests)
+            const successCount = toNonNegativeNumber(modelData?.success_count)
+            const failureCount = toNonNegativeNumber(modelData?.failure_count)
+            const inputTokens = toNonNegativeNumber(modelData?.input_tokens)
+            const outputTokens = toNonNegativeNumber(modelData?.output_tokens)
+            const cachedTokens = toNonNegativeNumber(modelData?.cached_tokens)
+            const reasoningTokens = toNonNegativeNumber(modelData?.reasoning_tokens)
+            const totalTokens = toNonNegativeNumber(modelData?.total_tokens)
+            const cost = calculateAggregateCost(modelName, inputTokens, outputTokens, cachedTokens, pricingMap)
+
+            return {
+              model: modelName,
+              requests,
+              successCount,
+              failureCount,
+              inputTokens,
+              outputTokens,
+              cachedTokens,
+              reasoningTokens,
+              totalTokens,
+              cost,
+            }
+          })
+        : []
+
+      const fallbackRequests = modelRows.reduce((sum, row) => sum + row.requests, 0)
+      const fallbackSuccess = modelRows.reduce((sum, row) => sum + row.successCount, 0)
+      const fallbackFailure = modelRows.reduce((sum, row) => sum + row.failureCount, 0)
+      const fallbackInput = modelRows.reduce((sum, row) => sum + row.inputTokens, 0)
+      const fallbackOutput = modelRows.reduce((sum, row) => sum + row.outputTokens, 0)
+      const fallbackCached = modelRows.reduce((sum, row) => sum + row.cachedTokens, 0)
+      const fallbackReasoning = modelRows.reduce((sum, row) => sum + row.reasoningTokens, 0)
+      const fallbackTokens = modelRows.reduce((sum, row) => sum + row.totalTokens, 0)
+      const fallbackCost = modelRows.reduce((sum, row) => sum + (row.cost || 0), 0)
+
+      return {
+        endpoint,
+        requests: toNonNegativeNumber(api?.total_requests) || fallbackRequests,
+        successCount: toNonNegativeNumber(api?.success_count) || fallbackSuccess,
+        failureCount: toNonNegativeNumber(api?.failure_count) || fallbackFailure,
+        inputTokens: toNonNegativeNumber(api?.input_tokens) || fallbackInput,
+        outputTokens: toNonNegativeNumber(api?.output_tokens) || fallbackOutput,
+        cachedTokens: toNonNegativeNumber(api?.cached_tokens) || fallbackCached,
+        reasoningTokens: toNonNegativeNumber(api?.reasoning_tokens) || fallbackReasoning,
+        totalTokens: toNonNegativeNumber(api?.total_tokens) || fallbackTokens,
+        cost: fallbackCost,
+        models: modelRows.sort((a, b) => b.requests - a.requests),
+      }
+    })
+    .sort((a, b) => b.requests - a.requests)
+}
+
+function buildModelStats(usage, pricingMap, requestDetails, sortBy) {
+  const lastUsedMap = {}
+  requestDetails.forEach((detail) => {
+    if (!detail.model || !detail.timestampMs) return
+    if (!lastUsedMap[detail.model] || detail.timestampMs > lastUsedMap[detail.model]) {
+      lastUsedMap[detail.model] = detail.timestampMs
+    }
+  })
+
+  const summaryRows = Array.isArray(usage?.models_summary)
+    ? usage.models_summary
+    : []
+
+  const rows = summaryRows.length > 0
+    ? summaryRows.map((row) => {
+        const model = row.model
+        const inputTokens = toNonNegativeNumber(row.input_tokens)
+        const outputTokens = toNonNegativeNumber(row.output_tokens)
+        const cachedTokens = toNonNegativeNumber(row.cached_tokens)
+        const reasoningTokens = toNonNegativeNumber(row.reasoning_tokens)
+
+        return {
+          model,
+          requests: toNonNegativeNumber(row.total_requests ?? row.requests),
+          successCount: toNonNegativeNumber(row.success_count),
+          failureCount: toNonNegativeNumber(row.failure_count),
+          inputTokens,
+          outputTokens,
+          cachedTokens,
+          reasoningTokens,
+          totalTokens: toNonNegativeNumber(row.total_tokens),
+          cost: calculateAggregateCost(model, inputTokens, outputTokens, cachedTokens, pricingMap),
+          lastUsed: row.last_used || (lastUsedMap[model] ? new Date(lastUsedMap[model]).toISOString() : ''),
+        }
+      })
+    : []
+
+  if (rows.length === 0 && usage?.apis) {
+    const modelMap = new Map()
+    Object.values(usage.apis).forEach((api) => {
+      Object.entries(api?.models || {}).forEach(([model, modelData]) => {
+        if (!modelMap.has(model)) {
+          modelMap.set(model, {
+            model,
+            requests: 0,
+            successCount: 0,
+            failureCount: 0,
+            inputTokens: 0,
+            outputTokens: 0,
+            cachedTokens: 0,
+            reasoningTokens: 0,
+            totalTokens: 0,
+            cost: null,
+            lastUsed: lastUsedMap[model] ? new Date(lastUsedMap[model]).toISOString() : '',
+          })
+        }
+
+        const row = modelMap.get(model)
+        row.requests += toNonNegativeNumber(modelData?.total_requests ?? modelData?.requests)
+        row.successCount += toNonNegativeNumber(modelData?.success_count)
+        row.failureCount += toNonNegativeNumber(modelData?.failure_count)
+        row.inputTokens += toNonNegativeNumber(modelData?.input_tokens)
+        row.outputTokens += toNonNegativeNumber(modelData?.output_tokens)
+        row.cachedTokens += toNonNegativeNumber(modelData?.cached_tokens)
+        row.reasoningTokens += toNonNegativeNumber(modelData?.reasoning_tokens)
+        row.totalTokens += toNonNegativeNumber(modelData?.total_tokens)
+        row.cost = calculateAggregateCost(model, row.inputTokens, row.outputTokens, row.cachedTokens, pricingMap)
+      })
+    })
+
+    rows.push(...Array.from(modelMap.values()))
+  }
+
+  if (sortBy === 'recent') {
+    return rows.sort((a, b) => Date.parse(b.lastUsed || '') - Date.parse(a.lastUsed || ''))
+  }
+
+  if (sortBy === 'cost') {
+    return rows.sort((a, b) => toSafeNumber(b.cost) - toSafeNumber(a.cost))
+  }
+
+  return rows.sort((a, b) => b.totalTokens - a.totalTokens)
+}
+
+function buildDailyStats(dailyTrendData) {
+  return [...dailyTrendData]
+    .filter((row) => row.requests > 0)
+    .reverse()
+}
+
+function getAvailableModels(usage) {
+  if (Array.isArray(usage?.models_summary) && usage.models_summary.length > 0) {
+    return usage.models_summary.map((row) => row.model).filter(Boolean).sort()
+  }
+
+  if (!usage?.apis) return []
+
+  const models = new Set()
+  Object.values(usage.apis).forEach((api) => {
+    Object.keys(api?.models || {}).forEach((model) => {
+      if (model) {
+        models.add(model)
+      }
+    })
+  })
+  return Array.from(models).sort()
+}
+
+function resolveSourceInfo(request, keyProviderCache) {
+  const authIndexKey = request.authIndex === undefined || request.authIndex === null
+    ? ''
+    : String(request.authIndex)
+
+  const cacheInfo =
+    keyProviderCache?.[authIndexKey] ||
+    keyProviderCache?.[request.source] ||
+    null
+
+  if (!cacheInfo) {
+    return {
+      label: request.source || '-',
+      channel: '',
+    }
+  }
+
+  if (cacheInfo.channel === 'api-key') {
+    return {
+      label: cacheInfo.provider || request.source || '-',
+      channel: 'api-key',
+    }
+  }
+
+  return {
+    label: cacheInfo.email || cacheInfo.source || request.source || '-',
+    channel: cacheInfo.channel || '',
+  }
+}
+
+function TabButton({ active, onClick, children }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
+        active
+          ? 'bg-white text-[#0d0d0d] shadow-sm'
+          : 'text-[#6e6e80] hover:text-[#0d0d0d]'
+      }`}
+    >
+      {children}
+    </button>
+  )
+}
+
+function OverviewCard({ title, value, meta = null, valueClassName = 'text-[#0d0d0d]' }) {
+  return (
+    <div className="p-6 border border-[#e5e5e5] rounded-xl">
+      <p className="text-sm text-[#6e6e80] mb-1">{title}</p>
+      <p className={`text-3xl font-semibold ${valueClassName}`}>{value}</p>
+      {meta && <div className="mt-3 text-xs text-[#6e6e80] space-y-1">{meta}</div>}
+    </div>
+  )
+}
 
 function App({ openCodeEnabled }) {
+  const pricingSeededRef = useRef(Object.keys(INITIAL_LOCAL_MODEL_PRICING).length > 0)
+
   const [usage, setUsage] = useState(null)
   const [loading, setLoading] = useState(true)
   const [lastExport, setLastExport] = useState(null)
-  const [activeTab, setActiveTab] = useState('requests') // 'requests' | 'models' | 'daily'
+  const [activeTab, setActiveTab] = useState('requests')
   const [keyProviderCache, setKeyProviderCache] = useState({})
-  const [modelPricing, setModelPricing] = useState({})
-  const [showPricingModal, setShowPricingModal] = useState(false)
+  const [modelPricing, setModelPricing] = useState(INITIAL_LOCAL_MODEL_PRICING)
   const [selectedModel, setSelectedModel] = useState('')
-  const [inputPrice, setInputPrice] = useState('')
-  const [outputPrice, setOutputPrice] = useState('')
-  const [requestChartMode, setRequestChartMode] = useState('hourly') // 'hourly' | 'daily'
-  const [tokenChartMode, setTokenChartMode] = useState('hourly') // 'hourly' | 'daily'
-  const [modelCompareChartMode, setModelCompareChartMode] = useState('hourly') // 'hourly' | 'daily' - 独立于 tokenChartMode
-  const [selectedModelsForChart, setSelectedModelsForChart] = useState([])
-  const [showModelSelectModal, setShowModelSelectModal] = useState(false)
-  const [modelCompareExpanded, setModelCompareExpanded] = useState(false)
-  const [modelSortBy, setModelSortBy] = useState('tokens') // 'tokens' | 'recent'
+  const [promptPrice, setPromptPrice] = useState('')
+  const [completionPrice, setCompletionPrice] = useState('')
+  const [cachePrice, setCachePrice] = useState('')
+  const [requestChartMode, setRequestChartMode] = useState('hourly')
+  const [tokenChartMode, setTokenChartMode] = useState('hourly')
+  const [modelSortBy, setModelSortBy] = useState('tokens')
   const [requestPage, setRequestPage] = useState(1)
-  const [openaiProviders, setOpenaiProviders] = useState([])
-  const [editingProvider, setEditingProvider] = useState(null)
-  const [providerForm, setProviderForm] = useState({ name: '', baseUrl: '', apiKeys: '', models: '' })
+  const [expandedApis, setExpandedApis] = useState({})
   const [syncing, setSyncing] = useState(false)
   const [syncMessage, setSyncMessage] = useState('')
   const [syncError, setSyncError] = useState('')
-
-  const MODEL_COLORS = [
-    '#0d0d0d', '#10a37f', '#ef4444', '#3b82f6', '#f59e0b', 
-    '#8b5cf6', '#ec4899', '#06b6d4', '#84cc16', '#f97316'
-  ]
-  const REQUESTS_PER_PAGE = 50
 
   const fetchUsage = async () => {
     try {
@@ -42,7 +719,14 @@ function App({ openCodeEnabled }) {
         setUsage(data.usage)
         setLastExport(data.lastExport)
         setKeyProviderCache(data.keyProviderCache || {})
-        setModelPricing(data.modelPricing || {})
+
+        if (!pricingSeededRef.current) {
+          const migratedPricing = migrateServerPricing(data.modelPricing || {})
+          if (Object.keys(migratedPricing).length > 0) {
+            setModelPricing(migratedPricing)
+            pricingSeededRef.current = true
+          }
+        }
       }
     } catch (e) {
       console.error('获取使用记录失败:', e)
@@ -58,6 +742,16 @@ function App({ openCodeEnabled }) {
   }, [])
 
   useEffect(() => {
+    persistLocalModelPricing(modelPricing)
+  }, [modelPricing])
+
+  useEffect(() => {
+    if (Object.keys(modelPricing).length > 0) {
+      pricingSeededRef.current = true
+    }
+  }, [modelPricing])
+
+  useEffect(() => {
     const es = new EventSource('/api/usage/stream')
     es.onmessage = (event) => {
       try {
@@ -69,9 +763,6 @@ function App({ openCodeEnabled }) {
         console.warn('SSE 消息解析失败:', e)
       }
     }
-    es.onerror = () => {
-      // EventSource 会自动重连，这里不手动处理
-    }
     return () => {
       es.close()
     }
@@ -81,6 +772,7 @@ function App({ openCodeEnabled }) {
     setSyncing(true)
     setSyncError('')
     setSyncMessage('')
+
     try {
       const res = await fetch('/api/usage/export-now', { method: 'POST' })
       const data = await res.json().catch(() => ({}))
@@ -98,280 +790,82 @@ function App({ openCodeEnabled }) {
     }
   }
 
-  const formatNumber = (num) => {
-    if (!num) return '0'
-    return num.toLocaleString()
-  }
-
-  const formatTokens = (num) => {
-    if (!num || num === 0) return '0'
-    if (num >= 1000000) {
-      return (num / 1000000).toFixed(2) + 'M'
+  const handleSelectPricingModel = (value) => {
+    setSelectedModel(value)
+    const existing = modelPricing[value]
+    if (existing) {
+      setPromptPrice(existing.promptPrice.toString())
+      setCompletionPrice(existing.completionPrice.toString())
+      setCachePrice(existing.cachePrice.toString())
+      return
     }
-    if (num >= 1000) {
-      return (num / 1000).toFixed(1) + 'K'
-    }
-    return num.toString()
+    setPromptPrice('')
+    setCompletionPrice('')
+    setCachePrice('')
   }
 
-  const getAvailableModels = () => {
-    if (!usage?.apis) return []
-    const models = new Set()
-    Object.values(usage.apis).forEach(api => {
-      if (api.models) {
-        Object.keys(api.models).forEach(name => models.add(name))
-      }
-    })
-    return Array.from(models).sort()
-  }
-
-  const handleSavePricing = async () => {
+  const handleSavePricing = () => {
     if (!selectedModel) return
-    try {
-      const res = await fetch('/api/pricing', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: selectedModel,
-          inputPrice: inputPrice,
-          outputPrice: outputPrice
-        })
-      })
-      if (res.ok) {
-        const data = await res.json()
-        setModelPricing(data.pricing)
-        setSelectedModel('')
-        setInputPrice('')
-        setOutputPrice('')
-      }
-    } catch (e) {
-      console.error('保存计费失败:', e)
-    }
-  }
 
-  const handleDeletePricing = async (model) => {
-    try {
-      const res = await fetch(`/api/pricing/${encodeURIComponent(model)}`, { method: 'DELETE' })
-      if (res.ok) {
-        const newPricing = { ...modelPricing }
-        delete newPricing[model]
-        setModelPricing(newPricing)
-      }
-    } catch (e) {
-      console.error('删除计费失败:', e)
-    }
-  }
-
-  const calculateCost = (inputTokens, outputTokens, model) => {
-    const pricing = modelPricing[model]
-    if (!pricing) return null
-    const inputCost = (inputTokens || 0) / 1000000 * pricing.inputPrice
-    const outputCost = (outputTokens || 0) / 1000000 * pricing.outputPrice
-    return inputCost + outputCost
-  }
-
-  const getHourlyChartData = () => {
-    const data = []
-    for (let i = 0; i < 24; i++) {
-      const hour = i.toString().padStart(2, '0')
-      data.push({
-        label: `${hour}:00`,
-        requests: usage?.requests_by_hour?.[hour] || 0,
-        tokens: usage?.tokens_by_hour?.[hour] || 0
-      })
-    }
-    return data
-  }
-
-  const getDailyChartData = () => {
-    const data = []
-    const today = new Date()
-    for (let i = 29; i >= 0; i--) {
-      const date = new Date(today)
-      date.setDate(date.getDate() - i)
-      const dateStr = date.toISOString().split('T')[0]
-      data.push({
-        label: dateStr.slice(5),
-        requests: usage?.requests_by_day?.[dateStr] || 0,
-        tokens: usage?.tokens_by_day?.[dateStr] || 0
-      })
-    }
-    return data
-  }
-
-  const requestChartData = requestChartMode === 'hourly' ? getHourlyChartData() : getDailyChartData()
-  const tokenChartData = tokenChartMode === 'hourly' ? getHourlyChartData() : getDailyChartData()
-
-  const getModelChartData = (mode) => {
-    if (selectedModelsForChart.length === 0) return []
-    
-    const data = []
-    if (mode === 'hourly') {
-      for (let i = 0; i < 24; i++) {
-        const hour = i.toString().padStart(2, '0')
-        const point = { label: `${hour}:00` }
-        selectedModelsForChart.forEach(model => {
-          point[model] = 0
-        })
-        data.push(point)
-      }
-    } else {
-      const today = new Date()
-      for (let i = 29; i >= 0; i--) {
-        const date = new Date(today)
-        date.setDate(date.getDate() - i)
-        const dateStr = date.toISOString().split('T')[0]
-        const point = { label: dateStr.slice(5) }
-        selectedModelsForChart.forEach(model => {
-          point[model] = 0
-        })
-        data.push(point)
-      }
+    const nextPricing = {
+      ...modelPricing,
+      [selectedModel]: {
+        promptPrice: toNonNegativeNumber(promptPrice),
+        completionPrice: toNonNegativeNumber(completionPrice),
+        cachePrice: cachePrice.trim() === ''
+          ? toNonNegativeNumber(promptPrice)
+          : toNonNegativeNumber(cachePrice),
+      },
     }
 
-    if (usage?.apis) {
-      Object.values(usage.apis).forEach(api => {
-        if (api.models) {
-          selectedModelsForChart.forEach(modelName => {
-            const modelData = api.models[modelName]
-            if (modelData?.details) {
-              modelData.details.forEach(detail => {
-                const ts = new Date(detail.timestamp)
-                if (mode === 'hourly') {
-                  const hour = ts.getHours().toString().padStart(2, '0')
-                  const idx = data.findIndex(d => d.label === `${hour}:00`)
-                  if (idx >= 0) {
-                    data[idx][modelName] += detail.tokens?.total_tokens || 0
-                  }
-                } else {
-                  const dateStr = ts.toISOString().split('T')[0].slice(5)
-                  const idx = data.findIndex(d => d.label === dateStr)
-                  if (idx >= 0) {
-                    data[idx][modelName] += detail.tokens?.total_tokens || 0
-                  }
-                }
-              })
-            }
-          })
-        }
-      })
-    }
-    return data
+    setModelPricing(nextPricing)
+    setSelectedModel('')
+    setPromptPrice('')
+    setCompletionPrice('')
+    setCachePrice('')
   }
 
-  const modelCompareData = getModelChartData(modelCompareChartMode)
-
-  const toggleModelForChart = (model) => {
-    setSelectedModelsForChart(prev => 
-      prev.includes(model) 
-        ? prev.filter(m => m !== model)
-        : [...prev, model]
-    )
+  const handleDeletePricing = (model) => {
+    const nextPricing = { ...modelPricing }
+    delete nextPricing[model]
+    setModelPricing(nextPricing)
   }
 
-  const formatTime = (isoString) => {
-    if (!isoString) return '-'
-    return new Date(isoString).toLocaleString('zh-CN')
+  const handleClearAllPricing = () => {
+    setModelPricing({})
+    setSelectedModel('')
+    setPromptPrice('')
+    setCompletionPrice('')
+    setCachePrice('')
   }
 
-  const formatRelativeTime = (isoString) => {
-    if (!isoString) return '-'
-    const date = new Date(isoString)
-    const now = new Date()
-    const diff = now - date
-    const minutes = Math.floor(diff / 60000)
-    const hours = Math.floor(diff / 3600000)
-    if (minutes < 1) return '刚刚'
-    if (minutes < 60) return `${minutes}分钟前`
-    if (hours < 24) return `${hours}小时前`
-    return date.toLocaleString('zh-CN', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+  const toggleApiExpand = (endpoint) => {
+    setExpandedApis((prev) => ({
+      ...prev,
+      [endpoint]: !prev[endpoint],
+    }))
   }
 
-  // 获取所有请求详情列表
-  const getRequestDetails = () => {
-    if (!usage?.apis) return []
-    const requests = []
-    Object.entries(usage.apis).forEach(([apiKey, api]) => {
-      if (api.models) {
-        Object.entries(api.models).forEach(([modelName, modelData]) => {
-          if (modelData.details) {
-            modelData.details.forEach(detail => {
-              requests.push({
-                model: modelName,
-                source: detail.source || '-',
-                authIndex: detail.auth_index || '-',
-                timestamp: detail.timestamp,
-                tokens: detail.tokens || {},
-                failed: detail.failed,
-                apiKey: apiKey
-              })
-            })
-          }
-        })
-      }
-    })
-    return requests.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
-  }
+  const requestDetails = buildRequestDetails(usage, modelPricing)
+  const overviewStats = buildOverviewStats(usage, requestDetails)
+  const hourlyTrendData = buildTrendData(requestDetails, 'hourly')
+  const dailyTrendData = buildTrendData(requestDetails, 'daily')
+  const requestChartData = requestChartMode === 'hourly' ? hourlyTrendData : dailyTrendData
+  const tokenChartData = tokenChartMode === 'hourly' ? hourlyTrendData : dailyTrendData
+  const recentWindowStats = buildRecentWindowStats(requestDetails, RECENT_WINDOW_MINUTES)
+  const serviceHealth = buildServiceHealthData(requestDetails)
+  const hasServiceHealthData = serviceHealth.totalSuccess + serviceHealth.totalFailure > 0
+  const apiStats = buildApiStats(usage, modelPricing)
+  const modelStats = buildModelStats(usage, modelPricing, requestDetails, modelSortBy)
+  const dailyStats = buildDailyStats(dailyTrendData)
+  const availableModels = getAvailableModels(usage)
+  const hasAnyPricing = Object.keys(modelPricing).length > 0
 
-  // 获取模型统计
-  const getModelStats = () => {
-    if (!usage?.apis) return []
-    const modelMap = new Map()
-    Object.values(usage.apis).forEach(api => {
-      if (api.models) {
-        Object.entries(api.models).forEach(([name, data]) => {
-          const details = data.details || []
-          const failed = details.filter(d => d.failed).length
-          const success = details.length - failed
-          const timestamps = details.map(d => new Date(d.timestamp).getTime()).filter(t => !isNaN(t))
-          const lastUsed = timestamps.length > 0 ? Math.max(...timestamps) : null
-
-          if (!modelMap.has(name)) {
-            modelMap.set(name, {
-              name,
-              requests: 0,
-              tokens: 0,
-              failed: 0,
-              success: 0,
-              lastUsed: null
-            })
-          }
-
-          const current = modelMap.get(name)
-          current.requests += data.requests || details.length || 0
-          current.tokens += data.total_tokens || 0
-          current.failed += failed
-          current.success += success
-          if (lastUsed && (!current.lastUsed || lastUsed > current.lastUsed)) {
-            current.lastUsed = lastUsed
-          }
-        })
-      }
-    })
-    const models = Array.from(modelMap.values())
-    if (modelSortBy === 'recent') {
-      return models.sort((a, b) => (b.lastUsed || 0) - (a.lastUsed || 0))
-    }
-    return models.sort((a, b) => b.tokens - a.tokens)
-  }
-
-  // 获取每日统计
-  const getDailyStats = () => {
-    if (!usage?.requests_by_day) return []
-    return Object.entries(usage.requests_by_day)
-      .map(([date, count]) => ({ date, count, tokens: usage.tokens_by_day?.[date] || 0 }))
-      .sort((a, b) => b.date.localeCompare(a.date))
-      .slice(0, 7)
-  }
-
-  const requestDetails = getRequestDetails()
   const totalRequestPages = Math.max(1, Math.ceil(requestDetails.length / REQUESTS_PER_PAGE))
   const pagedRequestDetails = requestDetails.slice(
     (requestPage - 1) * REQUESTS_PER_PAGE,
     requestPage * REQUESTS_PER_PAGE
   )
-  const modelStats = getModelStats()
-  const dailyStats = getDailyStats()
 
   useEffect(() => {
     setRequestPage(1)
@@ -380,7 +874,6 @@ function App({ openCodeEnabled }) {
   return (
     <div className="min-h-screen pt-10 pb-20 px-6 bg-white">
       <div className="max-w-7xl mx-auto">
-        {/* 右上角管理按钮 */}
         <div className="flex justify-end gap-3 mb-8">
           <Link
             to="/codex"
@@ -404,13 +897,12 @@ function App({ openCodeEnabled }) {
           )}
         </div>
 
-        {/* 头部区域 */}
         <div className="mb-10">
           <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
             <div>
               <h1 className="text-3xl font-semibold text-[#0d0d0d] mb-2">使用统计</h1>
               <p className="text-[#6e6e80]">
-                CLI Proxy API 使用记录 · 最后更新: {formatTime(lastExport)}
+                按小时与按天查看请求趋势、API 与模型分布、服务健康监测和费用估算 · 最后更新: {formatTime(lastExport)}
               </p>
             </div>
             <div className="flex items-center gap-3">
@@ -430,7 +922,6 @@ function App({ openCodeEnabled }) {
           {syncError && <p className="text-sm text-[#ef4444] mt-3">{syncError}</p>}
         </div>
 
-        {/* 加载状态 */}
         {loading && (
           <div className="text-center py-20">
             <div className="inline-block w-8 h-8 border-2 border-[#e5e5e5] border-t-[#0d0d0d] rounded-full animate-spin"></div>
@@ -440,58 +931,53 @@ function App({ openCodeEnabled }) {
 
         {!loading && (
           <>
-            {/* 概览卡片 */}
             <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5 mb-8">
-              <div className="p-6 border border-[#e5e5e5] rounded-xl">
-                <p className="text-sm text-[#6e6e80] mb-1">总请求数</p>
-                <p className="text-3xl font-semibold text-[#0d0d0d]">{formatNumber(usage?.total_requests)}</p>
-              </div>
-              <div className="p-6 border border-[#e5e5e5] rounded-xl">
-                <p className="text-sm text-[#6e6e80] mb-1">成功请求</p>
-                <p className="text-3xl font-semibold text-[#10a37f]">{formatNumber(usage?.success_count)}</p>
-              </div>
-              <div className="p-6 border border-[#e5e5e5] rounded-xl">
-                <p className="text-sm text-[#6e6e80] mb-1">失败请求</p>
-                <p className="text-3xl font-semibold text-[#ef4444]">{formatNumber(usage?.failure_count)}</p>
-              </div>
-              <div className="p-6 border border-[#e5e5e5] rounded-xl">
-                <p className="text-sm text-[#6e6e80] mb-1">总Token数</p>
-                <div className="flex items-end justify-between">
-                  <p className="text-3xl font-semibold text-[#0d0d0d]">{formatTokens(usage?.total_tokens)}</p>
-                  <div className="text-right leading-tight mb-0.5">
-                    <p className="text-[11px] text-[#6e6e80]">思考 {formatTokens((() => { let t = 0; if (usage?.apis) Object.values(usage.apis).forEach(a => { if (a.models) Object.values(a.models).forEach(m => { (m.details || []).forEach(d => { t += d.tokens?.reasoning_tokens || 0 }) }) }); return t })())}</p>
-                    <p className="text-[11px] text-[#6e6e80]">缓存 {formatTokens((() => { let t = 0; if (usage?.apis) Object.values(usage.apis).forEach(a => { if (a.models) Object.values(a.models).forEach(m => { (m.details || []).forEach(d => { t += d.tokens?.cached_tokens || 0 }) }) }); return t })())}</p>
-                  </div>
-                </div>
-              </div>
-              <div className="p-6 border border-[#e5e5e5] rounded-xl">
-                <p className="text-sm text-[#6e6e80] mb-1">总消耗金额</p>
-                <p className="text-3xl font-semibold text-[#0d0d0d]">
-                  ${(() => {
-                    let total = 0
-                    if (usage?.apis) {
-                      Object.values(usage.apis).forEach(api => {
-                        if (api.models) {
-                          Object.entries(api.models).forEach(([modelName, modelData]) => {
-                            if (modelData.details) {
-                              modelData.details.forEach(detail => {
-                                const cost = calculateCost(detail.tokens?.input_tokens, detail.tokens?.output_tokens, modelName)
-                                if (cost) total += cost
-                              })
-                            }
-                          })
-                        }
-                      })
-                    }
-                    return total.toFixed(4)
-                  })()}
-                </p>
-              </div>
+              <OverviewCard
+                title="总请求数"
+                value={formatNumber(overviewStats.totalRequests)}
+                meta={
+                  <>
+                    <p>成功 {formatNumber(overviewStats.successCount)}</p>
+                    <p>失败 {formatNumber(overviewStats.failureCount)}</p>
+                  </>
+                }
+              />
+              <OverviewCard
+                title="总 Token"
+                value={formatTokens(overviewStats.totalTokens)}
+                meta={
+                  <>
+                    <p>输入 {formatTokens(overviewStats.totalInputTokens)}</p>
+                    <p>输出 {formatTokens(overviewStats.totalOutputTokens)}</p>
+                    <p>缓存 {formatTokens(overviewStats.totalCachedTokens)}</p>
+                    <p>推理 {formatTokens(overviewStats.totalReasoningTokens)}</p>
+                  </>
+                }
+              />
+              <OverviewCard
+                title={`RPM (${RECENT_WINDOW_MINUTES} 分钟)`}
+                value={formatPerMinute(recentWindowStats.rpm)}
+                meta={<p>窗口内请求 {formatNumber(recentWindowStats.requestCount)}</p>}
+                valueClassName="text-[#10a37f]"
+              />
+              <OverviewCard
+                title={`TPM (${RECENT_WINDOW_MINUTES} 分钟)`}
+                value={formatPerMinute(recentWindowStats.tpm)}
+                meta={<p>窗口内 Token {formatTokens(recentWindowStats.tokenCount)}</p>}
+                valueClassName="text-[#f59e0b]"
+              />
+              <OverviewCard
+                title="预估费用"
+                value={hasAnyPricing ? formatUsd(overviewStats.totalCost) : '--'}
+                meta={
+                  hasAnyPricing
+                    ? <p>按当前浏览器保存的模型价格估算</p>
+                    : <p>设置模型价格后可显示费用</p>
+                }
+              />
             </div>
 
-            {/* 趋势图表 */}
             <div className="grid gap-6 lg:grid-cols-2 mb-8">
-              {/* 请求趋势 */}
               <div className="border border-[#e5e5e5] rounded-xl p-6">
                 <div className="flex items-center justify-between mb-4">
                   <h3 className="text-base font-semibold text-[#0d0d0d]">请求趋势</h3>
@@ -514,15 +1000,15 @@ function App({ openCodeEnabled }) {
                     </button>
                   </div>
                 </div>
-                <div className="h-56">
+                <div className="h-64">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={requestChartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#e5e5e5" />
                       <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="#6e6e80" />
-                      <YAxis tick={{ fontSize: 10 }} stroke="#6e6e80" width={35} />
-                      <Tooltip 
+                      <YAxis tick={{ fontSize: 10 }} stroke="#6e6e80" width={40} />
+                      <Tooltip
                         contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e5e5e5' }}
-                        formatter={(value) => [value, '请求数']}
+                        formatter={(value) => [formatNumber(value), '请求数']}
                       />
                       <Line type="monotone" dataKey="requests" stroke="#0d0d0d" strokeWidth={2} dot={false} />
                     </LineChart>
@@ -530,10 +1016,9 @@ function App({ openCodeEnabled }) {
                 </div>
               </div>
 
-              {/* Token使用趋势 */}
               <div className="border border-[#e5e5e5] rounded-xl p-6">
                 <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-base font-semibold text-[#0d0d0d]">Token 使用趋势</h3>
+                  <h3 className="text-base font-semibold text-[#0d0d0d]">Token 趋势</h3>
                   <div className="flex gap-1 p-0.5 bg-[#f7f7f8] rounded-md">
                     <button
                       onClick={() => setTokenChartMode('hourly')}
@@ -553,267 +1038,222 @@ function App({ openCodeEnabled }) {
                     </button>
                   </div>
                 </div>
-                <div className="h-56">
+                <div className="h-64">
                   <ResponsiveContainer width="100%" height="100%">
                     <LineChart data={tokenChartData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
                       <CartesianGrid strokeDasharray="3 3" stroke="#e5e5e5" />
                       <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="#6e6e80" />
-                      <YAxis tick={{ fontSize: 10 }} stroke="#6e6e80" width={40} tickFormatter={(v) => v >= 1000000 ? (v/1000000).toFixed(1)+'M' : v >= 1000 ? (v/1000).toFixed(0)+'K' : v} />
-                      <Tooltip 
+                      <YAxis
+                        tick={{ fontSize: 10 }}
+                        stroke="#6e6e80"
+                        width={45}
+                        tickFormatter={(value) => formatTokens(value)}
+                      />
+                      <Tooltip
                         contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e5e5e5' }}
                         formatter={(value) => [formatTokens(value), 'Tokens']}
                       />
-                      <Line type="monotone" dataKey="tokens" stroke="#10a37f" strokeWidth={2} dot={false} />
+                      <Line type="monotone" dataKey="totalTokens" stroke="#10a37f" strokeWidth={2} dot={false} />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
               </div>
             </div>
 
-            {/* 模型对比图表 - 可折叠 */}
-            <div className="border border-[#e5e5e5] rounded-xl mb-8 overflow-hidden">
-              <button
-                onClick={() => setModelCompareExpanded(!modelCompareExpanded)}
-                className="w-full px-6 py-4 flex items-center justify-between hover:bg-[#f7f7f8] transition-colors"
-              >
-                <div className="flex items-center gap-3">
-                  <h3 className="text-base font-semibold text-[#0d0d0d]">模型 Token 对比</h3>
-                  {selectedModelsForChart.length > 0 && (
-                    <span className="px-2 py-0.5 text-xs font-medium rounded-full bg-[#f0f0f0] text-[#6e6e80]">
-                      {selectedModelsForChart.length} 个模型
-                    </span>
-                  )}
+            <div className="border border-[#e5e5e5] rounded-xl p-6 mb-8">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between mb-5">
+                <div>
+                  <h3 className="text-base font-semibold text-[#0d0d0d]">服务健康监测</h3>
+                  <p className="text-sm text-[#6e6e80] mt-1">最近 7 天，每格 15 分钟，按请求成功率显示服务健康状态</p>
                 </div>
-                <svg 
-                  className={`w-5 h-5 text-[#6e6e80] transition-transform ${modelCompareExpanded ? 'rotate-180' : ''}`} 
-                  fill="none" stroke="currentColor" viewBox="0 0 24 24"
-                >
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                </svg>
-              </button>
-
-              {modelCompareExpanded && (
-                <div className="px-6 pb-6 border-t border-[#e5e5e5]">
-                  <div className="flex items-center justify-between py-4">
-                    <button
-                      onClick={() => setShowModelSelectModal(true)}
-                      className="px-3 py-1.5 text-xs font-medium rounded-lg border border-[#e5e5e5] text-[#6e6e80] hover:border-[#0d0d0d] hover:text-[#0d0d0d] transition-colors flex items-center gap-1.5"
-                    >
-                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                      </svg>
-                      选择模型
-                    </button>
-                    <div className="flex gap-1 p-0.5 bg-[#f7f7f8] rounded-md">
-                      <button
-                        onClick={() => setModelCompareChartMode('hourly')}
-                        className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
-                          modelCompareChartMode === 'hourly' ? 'bg-white text-[#0d0d0d] shadow-sm' : 'text-[#6e6e80]'
-                        }`}
-                      >
-                        24小时
-                      </button>
-                      <button
-                        onClick={() => setModelCompareChartMode('daily')}
-                        className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
-                          modelCompareChartMode === 'daily' ? 'bg-white text-[#0d0d0d] shadow-sm' : 'text-[#6e6e80]'
-                        }`}
-                      >
-                        30天
-                      </button>
-                    </div>
+                <div className="grid gap-3 sm:grid-cols-3">
+                  <div className="min-w-[140px] rounded-lg border border-[#e5e5e5] bg-[#fafafa] px-4 py-3">
+                    <p className="text-xs text-[#6e6e80]">整体成功率</p>
+                    <p className={`mt-1 text-lg font-semibold ${
+                      !hasServiceHealthData
+                        ? 'text-[#0d0d0d]'
+                        : serviceHealth.successRate >= 99
+                          ? 'text-[#15803d]'
+                          : serviceHealth.successRate >= 95
+                            ? 'text-[#b45309]'
+                            : 'text-[#dc2626]'
+                    }`}>
+                      {hasServiceHealthData ? `${serviceHealth.successRate.toFixed(1)}%` : '--'}
+                    </p>
                   </div>
-
-                  {selectedModelsForChart.length === 0 ? (
-                    <div className="h-56 flex items-center justify-center text-[#6e6e80] text-sm">
-                      <button 
-                        onClick={() => setShowModelSelectModal(true)}
-                        className="flex items-center gap-2 hover:text-[#0d0d0d] transition-colors"
-                      >
-                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                        </svg>
-                        点击选择模型添加到对比图表
-                      </button>
-                    </div>
-                  ) : (
-                    <div className="h-56">
-                      <ResponsiveContainer width="100%" height="100%">
-                        <LineChart data={modelCompareData} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="#e5e5e5" />
-                          <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="#6e6e80" />
-                          <YAxis tick={{ fontSize: 10 }} stroke="#6e6e80" width={45} tickFormatter={(v) => v >= 1000000 ? (v/1000000).toFixed(1)+'M' : v >= 1000 ? (v/1000).toFixed(0)+'K' : v} />
-                          <Tooltip 
-                            contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e5e5e5' }}
-                            formatter={(value, name) => [formatTokens(value), name]}
-                          />
-                          {selectedModelsForChart.map((model, idx) => (
-                            <Line 
-                              key={model}
-                              type="monotone" 
-                              dataKey={model} 
-                              stroke={MODEL_COLORS[selectedModelsForChart.indexOf(model) % MODEL_COLORS.length]} 
-                              strokeWidth={2} 
-                              dot={false} 
+                  <div className="min-w-[140px] rounded-lg border border-[#bbf7d0] bg-[#f0fdf4] px-4 py-3">
+                    <p className="text-xs text-[#166534]">成功请求</p>
+                    <p className="mt-1 text-lg font-semibold text-[#166534]">
+                      {formatNumber(serviceHealth.totalSuccess)}
+                    </p>
+                  </div>
+                  <div className="min-w-[140px] rounded-lg border border-[#fecaca] bg-[#fef2f2] px-4 py-3">
+                    <p className="text-xs text-[#b91c1c]">失败请求</p>
+                    <p className="mt-1 text-lg font-semibold text-[#b91c1c]">
+                      {formatNumber(serviceHealth.totalFailure)}
+                    </p>
+                  </div>
+                </div>
+              </div>
+              <div className="overflow-x-auto pb-1">
+                <div className="min-w-[1120px]">
+                  <div className="space-y-2">
+                    {serviceHealth.dayRows.map((row) => (
+                      <div key={row.key} className="grid grid-cols-[52px_minmax(0,1fr)] items-center gap-3">
+                        <div className="text-xs text-[#6e6e80] tabular-nums">{row.label}</div>
+                        <div
+                          className="grid gap-1"
+                          style={{ gridTemplateColumns: `repeat(${SERVICE_HEALTH_COLS}, minmax(0, 1fr))` }}
+                        >
+                          {row.blocks.map((block) => (
+                            <div
+                              key={block.key}
+                              title={block.title}
+                              className={`h-2.5 rounded-[3px] transition-transform duration-150 hover:scale-y-125 ${
+                                block.total === 0 ? 'border border-[#e2e8f0]' : ''
+                              }`}
+                              style={{ backgroundColor: block.color }}
                             />
                           ))}
-                        </LineChart>
-                      </ResponsiveContainer>
-                    </div>
-                  )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
 
-                  {/* 图例 - 可点击移除 */}
-                  {selectedModelsForChart.length > 0 && (
-                    <div className="flex flex-wrap gap-2 mt-4 pt-4 border-t border-[#e5e5e5]">
-                      {selectedModelsForChart.map((model, idx) => (
-                        <button
-                          key={model}
-                          onClick={() => toggleModelForChart(model)}
-                          className="flex items-center gap-1.5 px-2 py-1 text-xs rounded-full hover:bg-[#f7f7f8] transition-colors group"
-                        >
-                          <span 
-                            className="w-2.5 h-2.5 rounded-full" 
-                            style={{ backgroundColor: MODEL_COLORS[selectedModelsForChart.indexOf(model) % MODEL_COLORS.length] }}
-                          ></span>
-                          <span className="text-[#6e6e80]">{model}</span>
-                          <svg className="w-3 h-3 text-[#6e6e80] opacity-0 group-hover:opacity-100 transition-opacity" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                          </svg>
-                        </button>
-                      ))}
+                  <div className="grid grid-cols-[52px_minmax(0,1fr)] gap-3 mt-3">
+                    <div />
+                    <div
+                      className="grid text-[11px] text-[#94a3b8]"
+                      style={{ gridTemplateColumns: 'repeat(5, minmax(0, 1fr))' }}
+                    >
+                      <span className="text-left">00:00</span>
+                      <span className="text-center">06:00</span>
+                      <span className="text-center">12:00</span>
+                      <span className="text-center">18:00</span>
+                      <span className="text-right">24:00</span>
                     </div>
-                  )}
+                  </div>
                 </div>
-              )}
+              </div>
+
+              <div className="flex flex-wrap items-center gap-4 mt-4 text-xs text-[#6e6e80]">
+                <span>图例</span>
+                <span className="inline-flex items-center gap-2">
+                  <span className="w-3 h-3 rounded-[3px] border border-[#e2e8f0] bg-[#f8fafc]" />
+                  空闲
+                </span>
+                <span className="inline-flex items-center gap-2">
+                  <span className="w-3 h-3 rounded-[3px] bg-[#ef4444]" />
+                  失败较多
+                </span>
+                <span className="inline-flex items-center gap-2">
+                  <span className="w-3 h-3 rounded-[3px] bg-[#f59e0b]" />
+                  部分失败
+                </span>
+                <span className="inline-flex items-center gap-2">
+                  <span className="w-3 h-3 rounded-[3px] bg-[#22c55e]" />
+                  健康
+                </span>
+                {!hasServiceHealthData && (
+                  <span className="text-[#94a3b8]">最近 7 天暂无请求，当前全部显示为空闲窗口</span>
+                )}
+              </div>
             </div>
 
-            {/* Tab 切换 */}
-            <div className="flex gap-1 p-1 bg-[#f7f7f8] rounded-lg mb-6 w-fit">
-              <button
-                onClick={() => setActiveTab('requests')}
-                className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
-                  activeTab === 'requests' 
-                    ? 'bg-white text-[#0d0d0d] shadow-sm' 
-                    : 'text-[#6e6e80] hover:text-[#0d0d0d]'
-                }`}
-              >
+            <div className="flex gap-1 p-1 bg-[#f7f7f8] rounded-lg mb-6 w-fit flex-wrap">
+              <TabButton active={activeTab === 'requests'} onClick={() => setActiveTab('requests')}>
                 请求记录
-              </button>
-              <button
-                onClick={() => setActiveTab('models')}
-                className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
-                  activeTab === 'models' 
-                    ? 'bg-white text-[#0d0d0d] shadow-sm' 
-                    : 'text-[#6e6e80] hover:text-[#0d0d0d]'
-                }`}
-              >
+              </TabButton>
+              <TabButton active={activeTab === 'apis'} onClick={() => setActiveTab('apis')}>
+                API 统计
+              </TabButton>
+              <TabButton active={activeTab === 'models'} onClick={() => setActiveTab('models')}>
                 模型统计
-              </button>
-              <button
-                onClick={() => setActiveTab('daily')}
-                className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
-                  activeTab === 'daily' 
-                    ? 'bg-white text-[#0d0d0d] shadow-sm' 
-                    : 'text-[#6e6e80] hover:text-[#0d0d0d]'
-                }`}
-              >
-                每日统计
-              </button>
-              <button
-                onClick={() => setActiveTab('pricing')}
-                className={`px-4 py-2 text-sm font-medium rounded-md transition-colors ${
-                  activeTab === 'pricing' 
-                    ? 'bg-white text-[#0d0d0d] shadow-sm' 
-                    : 'text-[#6e6e80] hover:text-[#0d0d0d]'
-                }`}
-              >
-                模型计费
-              </button>
+              </TabButton>
+              <TabButton active={activeTab === 'daily'} onClick={() => setActiveTab('daily')}>
+                每日汇总
+              </TabButton>
+              <TabButton active={activeTab === 'pricing'} onClick={() => setActiveTab('pricing')}>
+                模型价格
+              </TabButton>
             </div>
 
-            {/* 请求记录列表 */}
             {activeTab === 'requests' && (
               <div className="border border-[#e5e5e5] rounded-xl overflow-hidden">
                 <div className="overflow-x-auto">
-                  <table className="w-full">
+                  <table className="w-full min-w-[1280px]">
                     <thead className="bg-[#f7f7f8] border-b border-[#e5e5e5]">
                       <tr>
                         <th className="text-left px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">时间</th>
+                        <th className="text-left px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">API</th>
                         <th className="text-left px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">模型</th>
-                        <th className="text-left px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">来源账号</th>
+                        <th className="text-left px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">来源</th>
                         <th className="text-right px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">输入</th>
                         <th className="text-right px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">输出</th>
                         <th className="text-right px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">缓存</th>
+                        <th className="text-right px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">推理</th>
                         <th className="text-right px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">总计</th>
+                        <th className="text-right px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">费用</th>
                         <th className="text-center px-4 py-3 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">状态</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#e5e5e5]">
                       {requestDetails.length === 0 ? (
                         <tr>
-                          <td colSpan={8} className="px-4 py-12 text-center text-[#6e6e80]">暂无请求记录</td>
+                          <td colSpan={11} className="px-4 py-12 text-center text-[#6e6e80]">暂无请求记录</td>
                         </tr>
                       ) : (
-                        pagedRequestDetails.map((req, idx) => (
-                          <tr key={idx} className="hover:bg-[#f7f7f8] transition-colors">
-                            <td className="px-4 py-3">
-                              <p className="text-sm font-medium text-[#0d0d0d]">{formatTime(req.timestamp)}</p>
-                              <p className="text-xs text-[#6e6e80]">{formatRelativeTime(req.timestamp)}</p>
-                            </td>
-                            <td className="px-4 py-3">
-                              <span className="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-[#f0f0f0] text-[#0d0d0d]">
-                                {req.model}
-                              </span>
-                            </td>
-                            <td className="px-4 py-3">
-                              {(() => {
-                                const cacheInfo = keyProviderCache[req.authIndex] || keyProviderCache[req.source];
-                                const isApiKey = cacheInfo?.channel === 'api-key';
-                                
-                                if (cacheInfo) {
-                                  return (
-                                    <div className="flex items-center gap-2">
-                                      <span className="text-sm text-[#0d0d0d] truncate max-w-[180px]" title={req.source}>
-                                        {isApiKey ? cacheInfo.provider : req.source}
-                                      </span>
-                                      <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-[#e5e5e5] text-[#6e6e80] uppercase flex-shrink-0">
-                                        {isApiKey ? 'api-key' : cacheInfo.channel}
-                                      </span>
-                                    </div>
-                                  );
-                                }
-                                return (
-                                  <span className="text-sm text-[#0d0d0d] truncate max-w-[200px]" title={req.source}>
-                                    {req.source}
+                        pagedRequestDetails.map((request) => {
+                          const sourceInfo = resolveSourceInfo(request, keyProviderCache)
+
+                          return (
+                            <tr key={request.id} className="hover:bg-[#f7f7f8] transition-colors">
+                              <td className="px-4 py-3">
+                                <p className="text-sm font-medium text-[#0d0d0d]">{formatTime(request.timestamp)}</p>
+                                <p className="text-xs text-[#6e6e80]">{formatRelativeTime(request.timestamp)}</p>
+                              </td>
+                              <td className="px-4 py-3">
+                                <span className="text-sm text-[#0d0d0d]">{request.endpoint}</span>
+                              </td>
+                              <td className="px-4 py-3">
+                                <span className="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-[#f0f0f0] text-[#0d0d0d]">
+                                  {request.model}
+                                </span>
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className="flex items-center gap-2">
+                                  <span className="text-sm text-[#0d0d0d] truncate max-w-[220px]" title={sourceInfo.label}>
+                                    {sourceInfo.label}
                                   </span>
-                                );
-                              })()}
-                            </td>
-                            <td className="px-4 py-3 text-right">
-                              <span className="text-sm text-[#6e6e80]">{formatTokens(req.tokens.input_tokens)}</span>
-                            </td>
-                            <td className="px-4 py-3 text-right">
-                              <span className="text-sm text-[#6e6e80]">{formatTokens(req.tokens.output_tokens)}</span>
-                            </td>
-                            <td className="px-4 py-3 text-right">
-                              <span className={`text-sm ${req.tokens.cached_tokens > 0 ? 'font-medium text-[#10a37f]' : 'text-[#6e6e80]'}`}>{formatTokens(req.tokens.cached_tokens || 0)}</span>
-                            </td>
-                            <td className="px-4 py-3 text-right">
-                              <span className="text-sm font-medium text-[#0d0d0d]">{formatTokens(req.tokens.total_tokens)}</span>
-                            </td>
-                            <td className="px-4 py-3 text-center">
-                              {req.failed ? (
-                                <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-[#fef2f2] text-[#ef4444]">
-                                  失败
-                                </span>
-                              ) : (
-                                <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-[#f0fdf4] text-[#10a37f]">
-                                  成功
-                                </span>
-                              )}
-                            </td>
-                          </tr>
-                        ))
+                                  {sourceInfo.channel && (
+                                    <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-[#e5e5e5] text-[#6e6e80] uppercase">
+                                      {sourceInfo.channel}
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="px-4 py-3 text-right text-sm text-[#6e6e80]">{formatTokens(request.inputTokens)}</td>
+                              <td className="px-4 py-3 text-right text-sm text-[#6e6e80]">{formatTokens(request.outputTokens)}</td>
+                              <td className="px-4 py-3 text-right text-sm text-[#3b82f6]">{formatTokens(request.cachedTokens)}</td>
+                              <td className="px-4 py-3 text-right text-sm text-[#f59e0b]">{formatTokens(request.reasoningTokens)}</td>
+                              <td className="px-4 py-3 text-right text-sm font-medium text-[#0d0d0d]">{formatTokens(request.totalTokens)}</td>
+                              <td className="px-4 py-3 text-right text-sm text-[#6e6e80]">
+                                {request.hasPrice ? formatUsd(request.cost) : '-'}
+                              </td>
+                              <td className="px-4 py-3 text-center">
+                                {request.failed ? (
+                                  <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-[#fef2f2] text-[#ef4444]">
+                                    失败
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-[#f0fdf4] text-[#10a37f]">
+                                    成功
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+                          )
+                        })
                       )}
                     </tbody>
                   </table>
@@ -825,16 +1265,16 @@ function App({ openCodeEnabled }) {
                     </p>
                     <div className="flex items-center gap-2">
                       <button
-                        onClick={() => setRequestPage(p => Math.max(1, p - 1))}
+                        onClick={() => setRequestPage((page) => Math.max(1, page - 1))}
                         disabled={requestPage === 1}
-                        className="px-3 py-1.5 text-xs border border-[#e5e5e5] rounded-md text-[#0d0d0d] disabled:opacity-40 disabled:cursor-not-allowed hover:bg-[#f7f7f8]"
+                        className="px-3 py-1.5 text-xs font-medium border border-[#e5e5e5] rounded-md text-[#6e6e80] hover:text-[#0d0d0d] hover:border-[#0d0d0d] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                       >
                         上一页
                       </button>
                       <button
-                        onClick={() => setRequestPage(p => Math.min(totalRequestPages, p + 1))}
+                        onClick={() => setRequestPage((page) => Math.min(totalRequestPages, page + 1))}
                         disabled={requestPage === totalRequestPages}
-                        className="px-3 py-1.5 text-xs border border-[#e5e5e5] rounded-md text-[#0d0d0d] disabled:opacity-40 disabled:cursor-not-allowed hover:bg-[#f7f7f8]"
+                        className="px-3 py-1.5 text-xs font-medium border border-[#e5e5e5] rounded-md text-[#6e6e80] hover:text-[#0d0d0d] hover:border-[#0d0d0d] disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
                       >
                         下一页
                       </button>
@@ -844,11 +1284,89 @@ function App({ openCodeEnabled }) {
               </div>
             )}
 
-            {/* 模型统计 */}
+            {activeTab === 'apis' && (
+              <div className="space-y-4">
+                {apiStats.length === 0 ? (
+                  <div className="border border-[#e5e5e5] rounded-xl p-8 text-center text-[#6e6e80]">
+                    暂无 API 统计数据
+                  </div>
+                ) : (
+                  apiStats.map((api) => (
+                    <div key={api.endpoint} className="border border-[#e5e5e5] rounded-xl overflow-hidden">
+                      <button
+                        onClick={() => toggleApiExpand(api.endpoint)}
+                        className="w-full px-6 py-5 flex items-start justify-between gap-4 hover:bg-[#f7f7f8] transition-colors text-left"
+                      >
+                        <div className="flex-1 min-w-0">
+                          <p className="text-base font-semibold text-[#0d0d0d] break-all">{api.endpoint}</p>
+                          <div className="flex flex-wrap gap-2 mt-3 text-xs">
+                            <span className="px-2 py-1 rounded-full bg-[#f7f7f8] text-[#0d0d0d]">请求 {formatNumber(api.requests)}</span>
+                            <span className="px-2 py-1 rounded-full bg-[#f0fdf4] text-[#10a37f]">成功 {formatNumber(api.successCount)}</span>
+                            <span className="px-2 py-1 rounded-full bg-[#fef2f2] text-[#ef4444]">失败 {formatNumber(api.failureCount)}</span>
+                            <span className="px-2 py-1 rounded-full bg-[#eff6ff] text-[#2563eb]">缓存 {formatTokens(api.cachedTokens)}</span>
+                            <span className="px-2 py-1 rounded-full bg-[#fff7ed] text-[#c2410c]">推理 {formatTokens(api.reasoningTokens)}</span>
+                            <span className="px-2 py-1 rounded-full bg-[#f7f7f8] text-[#0d0d0d]">总 Token {formatTokens(api.totalTokens)}</span>
+                            {hasAnyPricing && (
+                              <span className="px-2 py-1 rounded-full bg-[#fffbeb] text-[#b45309]">费用 {formatUsd(api.cost)}</span>
+                            )}
+                          </div>
+                        </div>
+                        <svg
+                          className={`w-5 h-5 text-[#6e6e80] transition-transform ${expandedApis[api.endpoint] ? 'rotate-180' : ''}`}
+                          fill="none"
+                          stroke="currentColor"
+                          viewBox="0 0 24 24"
+                        >
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                        </svg>
+                      </button>
+
+                      {expandedApis[api.endpoint] && (
+                        <div className="px-6 pb-6 border-t border-[#e5e5e5]">
+                          <div className="overflow-x-auto mt-4">
+                            <table className="w-full min-w-[920px]">
+                              <thead>
+                                <tr className="border-b border-[#e5e5e5]">
+                                  <th className="text-left py-3 pr-4 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">模型</th>
+                                  <th className="text-right py-3 px-2 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">请求</th>
+                                  <th className="text-right py-3 px-2 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">成功</th>
+                                  <th className="text-right py-3 px-2 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">失败</th>
+                                  <th className="text-right py-3 px-2 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">缓存</th>
+                                  <th className="text-right py-3 px-2 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">推理</th>
+                                  <th className="text-right py-3 px-2 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">总 Token</th>
+                                  <th className="text-right py-3 pl-4 text-xs font-medium text-[#6e6e80] uppercase tracking-wider">费用</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {api.models.map((model) => (
+                                  <tr key={`${api.endpoint}-${model.model}`} className="border-b border-[#f0f0f0] last:border-0">
+                                    <td className="py-3 pr-4 text-sm font-medium text-[#0d0d0d]">{model.model}</td>
+                                    <td className="py-3 px-2 text-right text-sm text-[#6e6e80]">{formatNumber(model.requests)}</td>
+                                    <td className="py-3 px-2 text-right text-sm text-[#10a37f]">{formatNumber(model.successCount)}</td>
+                                    <td className="py-3 px-2 text-right text-sm text-[#ef4444]">{formatNumber(model.failureCount)}</td>
+                                    <td className="py-3 px-2 text-right text-sm text-[#2563eb]">{formatTokens(model.cachedTokens)}</td>
+                                    <td className="py-3 px-2 text-right text-sm text-[#c2410c]">{formatTokens(model.reasoningTokens)}</td>
+                                    <td className="py-3 px-2 text-right text-sm font-medium text-[#0d0d0d]">{formatTokens(model.totalTokens)}</td>
+                                    <td className="py-3 pl-4 text-right text-sm text-[#6e6e80]">
+                                      {hasAnyPricing && model.cost !== null ? formatUsd(model.cost) : '-'}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
+
             {activeTab === 'models' && (
               <div className="border border-[#e5e5e5] rounded-xl p-6">
-                <div className="flex items-center justify-between mb-4">
-                  <span className="text-sm text-[#6e6e80]">共 {modelStats.length} 个模型</span>
+                <div className="flex items-center justify-between mb-6">
+                  <h3 className="text-base font-semibold text-[#0d0d0d]">模型统计</h3>
                   <div className="flex gap-1 p-0.5 bg-[#f7f7f8] rounded-md">
                     <button
                       onClick={() => setModelSortBy('tokens')}
@@ -856,7 +1374,7 @@ function App({ openCodeEnabled }) {
                         modelSortBy === 'tokens' ? 'bg-white text-[#0d0d0d] shadow-sm' : 'text-[#6e6e80]'
                       }`}
                     >
-                      按用量
+                      按 Token
                     </button>
                     <button
                       onClick={() => setModelSortBy('recent')}
@@ -866,156 +1384,216 @@ function App({ openCodeEnabled }) {
                     >
                       按最近
                     </button>
-                  </div>
-                </div>
-                {modelStats.length === 0 ? (
-                  <p className="text-[#6e6e80] text-sm text-center py-8">暂无数据</p>
-                ) : (
-                  <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                    {modelStats.map(model => (
-                      <div key={model.name} className="p-4 bg-[#f7f7f8] rounded-xl">
-                        <p className="text-sm font-medium text-[#0d0d0d] truncate mb-3">{model.name}</p>
-                        <div className="flex justify-between items-end">
-                          <div>
-                            <p className="text-2xl font-semibold text-[#0d0d0d]">{model.requests}</p>
-                            <p className="text-xs text-[#6e6e80]">次请求</p>
-                          </div>
-                          <div className="text-right">
-                            <p className="text-lg font-medium text-[#6e6e80]">{formatTokens(model.tokens)}</p>
-                            <p className="text-xs text-[#6e6e80]">tokens</p>
-                          </div>
-                        </div>
-                        <div className="mt-2 space-y-1">
-                          <p className="text-xs text-[#10a37f]">{model.success} 次成功</p>
-                          {model.failed > 0 && (
-                            <p className="text-xs text-[#ef4444]">{model.failed} 次失败</p>
-                          )}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* 每日统计 */}
-            {activeTab === 'daily' && (
-              <div className="border border-[#e5e5e5] rounded-xl p-6">
-                {dailyStats.length === 0 ? (
-                  <p className="text-[#6e6e80] text-sm text-center py-8">暂无数据</p>
-                ) : (
-                  <div className="space-y-3">
-                    {dailyStats.map(day => (
-                      <div key={day.date} className="flex items-center justify-between p-4 bg-[#f7f7f8] rounded-xl">
-                        <div>
-                          <p className="text-base font-medium text-[#0d0d0d]">{day.date}</p>
-                          <p className="text-sm text-[#6e6e80]">{formatTokens(day.tokens)} tokens</p>
-                        </div>
-                        <div className="text-right">
-                          <p className="text-2xl font-semibold text-[#0d0d0d]">{day.count}</p>
-                          <p className="text-xs text-[#6e6e80]">次请求</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* 模型计费 */}
-            {activeTab === 'pricing' && (
-              <div className="border border-[#e5e5e5] rounded-xl p-6">
-                {/* 添加新计费 */}
-                <div className="mb-6">
-                  <h3 className="text-sm font-medium text-[#0d0d0d] mb-3">设置模型费用</h3>
-                  <div className="flex gap-3 items-end">
-                    <div className="flex-1">
-                      <label className="block text-xs text-[#6e6e80] mb-1">选择模型</label>
-                      <select
-                        value={selectedModel}
-                        onChange={e => {
-                          setSelectedModel(e.target.value)
-                          const existing = modelPricing[e.target.value]
-                          if (existing) {
-                            setInputPrice(existing.inputPrice.toString())
-                            setOutputPrice(existing.outputPrice.toString())
-                          } else {
-                            setInputPrice('')
-                            setOutputPrice('')
-                          }
-                        }}
-                        className="w-full px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0d0d0d]"
-                      >
-                        <option value="">选择模型...</option>
-                        {getAvailableModels().map(model => (
-                          <option key={model} value={model}>{model}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div className="w-32">
-                      <label className="block text-xs text-[#6e6e80] mb-1">输入 ($/M)</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={inputPrice}
-                        onChange={e => setInputPrice(e.target.value)}
-                        placeholder="0.00"
-                        className="w-full px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0d0d0d]"
-                      />
-                    </div>
-                    <div className="w-32">
-                      <label className="block text-xs text-[#6e6e80] mb-1">输出 ($/M)</label>
-                      <input
-                        type="number"
-                        step="0.01"
-                        value={outputPrice}
-                        onChange={e => setOutputPrice(e.target.value)}
-                        placeholder="0.00"
-                        className="w-full px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0d0d0d]"
-                      />
-                    </div>
                     <button
-                      onClick={handleSavePricing}
-                      disabled={!selectedModel}
-                      className="px-4 py-2 bg-[#0d0d0d] text-white text-sm font-medium rounded-lg hover:bg-[#2d2d2d] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                      onClick={() => setModelSortBy('cost')}
+                      className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
+                        modelSortBy === 'cost' ? 'bg-white text-[#0d0d0d] shadow-sm' : 'text-[#6e6e80]'
+                      }`}
                     >
-                      保存
+                      按费用
                     </button>
                   </div>
                 </div>
 
-                {/* 已设置的计费列表 */}
-                {Object.keys(modelPricing).length > 0 ? (
-                  <div>
-                    <h3 className="text-sm font-medium text-[#0d0d0d] mb-3">已设置的模型 ({Object.keys(modelPricing).length})</h3>
-                    <div className="grid gap-3 md:grid-cols-2 lg:grid-cols-3">
-                      {Object.entries(modelPricing).map(([model, pricing]) => (
-                        <div key={model} className="flex items-center justify-between p-4 bg-[#f7f7f8] rounded-xl">
+                {modelStats.length === 0 ? (
+                  <p className="text-[#6e6e80] text-sm text-center py-8">暂无模型统计数据</p>
+                ) : (
+                  <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+                    {modelStats.map((model) => (
+                      <div key={model.model} className="p-5 bg-[#f7f7f8] rounded-xl border border-[#ececec]">
+                        <div className="flex items-start justify-between gap-3">
                           <div>
-                            <p className="text-sm font-medium text-[#0d0d0d] truncate">{model}</p>
-                            <p className="text-xs text-[#6e6e80] mt-1">
-                              输入: ${pricing.inputPrice}/M · 输出: ${pricing.outputPrice}/M
+                            <p className="text-base font-semibold text-[#0d0d0d] break-all">{model.model}</p>
+                            <p className="text-xs text-[#6e6e80] mt-1">最近使用 {formatRelativeTime(model.lastUsed)}</p>
+                          </div>
+                          <span className="text-xs px-2 py-1 rounded-full bg-white text-[#6e6e80] border border-[#e5e5e5]">
+                            {formatNumber(model.requests)} 次
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3 mt-4 text-sm">
+                          <div className="p-3 bg-white rounded-lg border border-[#e5e5e5]">
+                            <p className="text-[#6e6e80] text-xs">总 Token</p>
+                            <p className="text-[#0d0d0d] font-semibold mt-1">{formatTokens(model.totalTokens)}</p>
+                          </div>
+                          <div className="p-3 bg-white rounded-lg border border-[#e5e5e5]">
+                            <p className="text-[#6e6e80] text-xs">预估费用</p>
+                            <p className="text-[#0d0d0d] font-semibold mt-1">
+                              {hasAnyPricing && model.cost !== null ? formatUsd(model.cost) : '-'}
                             </p>
                           </div>
-                          <button
-                            onClick={() => handleDeletePricing(model)}
-                            className="text-[#ef4444] hover:text-[#dc2626] p-1 ml-2 flex-shrink-0"
-                          >
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                            </svg>
-                          </button>
+                          <div className="p-3 bg-white rounded-lg border border-[#e5e5e5]">
+                            <p className="text-[#6e6e80] text-xs">缓存 Token</p>
+                            <p className="text-[#2563eb] font-semibold mt-1">{formatTokens(model.cachedTokens)}</p>
+                          </div>
+                          <div className="p-3 bg-white rounded-lg border border-[#e5e5e5]">
+                            <p className="text-[#6e6e80] text-xs">推理 Token</p>
+                            <p className="text-[#c2410c] font-semibold mt-1">{formatTokens(model.reasoningTokens)}</p>
+                          </div>
                         </div>
-                      ))}
-                    </div>
+
+                        <div className="mt-4 flex flex-wrap gap-2 text-xs">
+                          <span className="px-2 py-1 rounded-full bg-[#f0fdf4] text-[#10a37f]">成功 {formatNumber(model.successCount)}</span>
+                          <span className="px-2 py-1 rounded-full bg-[#fef2f2] text-[#ef4444]">失败 {formatNumber(model.failureCount)}</span>
+                          <span className="px-2 py-1 rounded-full bg-white text-[#6e6e80] border border-[#e5e5e5]">输入 {formatTokens(model.inputTokens)}</span>
+                          <span className="px-2 py-1 rounded-full bg-white text-[#6e6e80] border border-[#e5e5e5]">输出 {formatTokens(model.outputTokens)}</span>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ) : (
-                  <p className="text-[#6e6e80] text-sm text-center py-8">暂未设置任何模型计费</p>
                 )}
               </div>
             )}
 
-            {/* 无数据提示 */}
+            {activeTab === 'daily' && (
+              <div className="border border-[#e5e5e5] rounded-xl p-6">
+                {dailyStats.length === 0 ? (
+                  <p className="text-[#6e6e80] text-sm text-center py-8">暂无每日汇总数据</p>
+                ) : (
+                  <div className="space-y-3">
+                    {dailyStats.map((day) => (
+                      <div key={day.key} className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between p-4 bg-[#f7f7f8] rounded-xl">
+                        <div>
+                          <p className="text-base font-medium text-[#0d0d0d]">{day.fullDate || day.label}</p>
+                          <div className="flex flex-wrap gap-2 mt-2 text-xs text-[#6e6e80]">
+                            <span>输入 {formatTokens(day.inputTokens)}</span>
+                            <span>输出 {formatTokens(day.outputTokens)}</span>
+                            <span>缓存 {formatTokens(day.cachedTokens)}</span>
+                            <span>推理 {formatTokens(day.reasoningTokens)}</span>
+                            {hasAnyPricing && <span>费用 {formatUsd(day.cost)}</span>}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-4 text-right">
+                          <div>
+                            <p className="text-xs text-[#6e6e80]">请求</p>
+                            <p className="text-2xl font-semibold text-[#0d0d0d]">{formatNumber(day.requests)}</p>
+                          </div>
+                          <div>
+                            <p className="text-xs text-[#6e6e80]">总 Token</p>
+                            <p className="text-xl font-semibold text-[#0d0d0d]">{formatTokens(day.totalTokens)}</p>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeTab === 'pricing' && (
+              <div className="border border-[#e5e5e5] rounded-xl p-6">
+                <div className="flex flex-col gap-2 mb-6">
+                  <h3 className="text-base font-semibold text-[#0d0d0d]">模型价格</h3>
+                  <p className="text-sm text-[#6e6e80]">
+                    价格仅保存在当前浏览器，用于费用估算，不会写回服务器配置。
+                  </p>
+                </div>
+
+                <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_140px_140px_140px_auto] items-end mb-8">
+                  <div>
+                    <label className="block text-xs text-[#6e6e80] mb-1">选择模型</label>
+                    <select
+                      value={selectedModel}
+                      onChange={(event) => handleSelectPricingModel(event.target.value)}
+                      className="w-full px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0d0d0d]"
+                    >
+                      <option value="">选择模型...</option>
+                      {availableModels.map((model) => (
+                        <option key={model} value={model}>
+                          {model}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6e6e80] mb-1">Prompt ($/1M)</label>
+                    <input
+                      type="number"
+                      step="0.0001"
+                      value={promptPrice}
+                      onChange={(event) => setPromptPrice(event.target.value)}
+                      placeholder="0.0000"
+                      className="w-full px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0d0d0d]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6e6e80] mb-1">Completion ($/1M)</label>
+                    <input
+                      type="number"
+                      step="0.0001"
+                      value={completionPrice}
+                      onChange={(event) => setCompletionPrice(event.target.value)}
+                      placeholder="0.0000"
+                      className="w-full px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0d0d0d]"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-[#6e6e80] mb-1">Cache ($/1M)</label>
+                    <input
+                      type="number"
+                      step="0.0001"
+                      value={cachePrice}
+                      onChange={(event) => setCachePrice(event.target.value)}
+                      placeholder="默认同 Prompt"
+                      className="w-full px-3 py-2 border border-[#e5e5e5] rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-[#0d0d0d]"
+                    />
+                  </div>
+                  <button
+                    onClick={handleSavePricing}
+                    disabled={!selectedModel}
+                    className="px-4 py-2 bg-[#0d0d0d] text-white text-sm font-medium rounded-lg hover:bg-[#2d2d2d] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                  >
+                    保存
+                  </button>
+                </div>
+
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-sm font-medium text-[#0d0d0d]">已保存的模型价格</h4>
+                  {Object.keys(modelPricing).length > 0 && (
+                    <button
+                      onClick={handleClearAllPricing}
+                      className="text-xs text-[#ef4444] hover:text-[#dc2626] transition-colors"
+                    >
+                      清空全部
+                    </button>
+                  )}
+                </div>
+
+                {Object.keys(modelPricing).length === 0 ? (
+                  <p className="text-[#6e6e80] text-sm text-center py-8">暂未设置任何模型价格</p>
+                ) : (
+                  <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                    {Object.entries(modelPricing).map(([model, pricing]) => (
+                      <div key={model} className="flex items-start justify-between gap-3 p-4 bg-[#f7f7f8] rounded-xl border border-[#ececec]">
+                        <div>
+                          <p className="text-sm font-medium text-[#0d0d0d] break-all">{model}</p>
+                          <div className="text-xs text-[#6e6e80] mt-2 space-y-1">
+                            <p>Prompt: {formatUsd(pricing.promptPrice)}/1M</p>
+                            <p>Completion: {formatUsd(pricing.completionPrice)}/1M</p>
+                            <p>Cache: {formatUsd(pricing.cachePrice)}/1M</p>
+                          </div>
+                        </div>
+                        <div className="flex flex-col gap-2">
+                          <button
+                            onClick={() => handleSelectPricingModel(model)}
+                            className="px-3 py-1.5 text-xs font-medium border border-[#e5e5e5] rounded-md text-[#6e6e80] hover:text-[#0d0d0d] hover:border-[#0d0d0d] transition-colors"
+                          >
+                            编辑
+                          </button>
+                          <button
+                            onClick={() => handleDeletePricing(model)}
+                            className="px-3 py-1.5 text-xs font-medium border border-[#fecaca] rounded-md text-[#ef4444] hover:text-[#dc2626] hover:border-[#fca5a5] transition-colors"
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
             {!usage && activeTab !== 'pricing' && (
               <div className="text-center py-16 text-[#6e6e80]">
                 <svg className="w-16 h-16 mx-auto mb-4 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1028,65 +1606,6 @@ function App({ openCodeEnabled }) {
           </>
         )}
       </div>
-
-      {/* 模型选择模态框 */}
-      {showModelSelectModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={() => setShowModelSelectModal(false)}>
-          <div className="bg-white rounded-2xl shadow-xl w-full max-w-md mx-4 max-h-[80vh] overflow-hidden" onClick={e => e.stopPropagation()}>
-            <div className="px-6 py-4 border-b border-[#e5e5e5] flex items-center justify-between">
-              <h2 className="text-lg font-semibold text-[#0d0d0d]">选择对比模型</h2>
-              <button onClick={() => setShowModelSelectModal(false)} className="text-[#6e6e80] hover:text-[#0d0d0d]">
-                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                </svg>
-              </button>
-            </div>
-            
-            <div className="p-6 overflow-y-auto max-h-[60vh]">
-              <p className="text-sm text-[#6e6e80] mb-4">点击模型添加或移除对比（已选 {selectedModelsForChart.length} 个）</p>
-              <div className="space-y-2">
-                {getAvailableModels().map((model, idx) => (
-                  <button
-                    key={model}
-                    onClick={() => toggleModelForChart(model)}
-                    className={`w-full flex items-center justify-between p-3 rounded-lg border transition-colors ${
-                      selectedModelsForChart.includes(model)
-                        ? 'border-[#0d0d0d] bg-[#f7f7f8]'
-                        : 'border-[#e5e5e5] hover:border-[#0d0d0d]'
-                    }`}
-                  >
-                    <span className="text-sm text-[#0d0d0d]">{model}</span>
-                    {selectedModelsForChart.includes(model) && (
-                      <svg className="w-5 h-5 text-[#10a37f]" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                      </svg>
-                    )}
-                  </button>
-                ))}
-              </div>
-              
-              {getAvailableModels().length === 0 && (
-                <p className="text-center text-[#6e6e80] text-sm py-8">暂无可用模型</p>
-              )}
-            </div>
-
-            <div className="px-6 py-4 border-t border-[#e5e5e5] flex gap-3">
-              <button
-                onClick={() => setSelectedModelsForChart([])}
-                className="flex-1 py-2 text-sm font-medium text-[#6e6e80] hover:text-[#0d0d0d] transition-colors"
-              >
-                清空选择
-              </button>
-              <button
-                onClick={() => setShowModelSelectModal(false)}
-                className="flex-1 py-2 bg-[#0d0d0d] text-white text-sm font-medium rounded-lg hover:bg-[#2d2d2d] transition-colors"
-              >
-                完成
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   )
 }

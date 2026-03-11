@@ -11,7 +11,8 @@ import {
 } from 'recharts'
 import { apiFetch, createApiEventSource } from './auth.js'
 
-const REQUESTS_PER_PAGE = 50
+const DEFAULT_REQUESTS_PER_PAGE = 10
+const REQUESTS_PER_PAGE_OPTIONS = [10, 20, 50, 100]
 const RECENT_WINDOW_MINUTES = 30
 const LOCAL_MODEL_PRICING_KEY = 'api-center-local-model-pricing-v1'
 const SERVICE_HEALTH_ROWS = 7
@@ -796,6 +797,7 @@ function App({ openCodeEnabled }) {
   const [tokenChartMode, setTokenChartMode] = useState('hourly')
   const [modelSortBy, setModelSortBy] = useState('tokens')
   const [requestPage, setRequestPage] = useState(1)
+  const [requestsPerPage, setRequestsPerPage] = useState(DEFAULT_REQUESTS_PER_PAGE)
   const [expandedApis, setExpandedApis] = useState({})
   const [syncing, setSyncing] = useState(false)
   const [syncMessage, setSyncMessage] = useState('')
@@ -952,15 +954,15 @@ function App({ openCodeEnabled }) {
   const availableModels = getAvailableModels(usage)
   const hasAnyPricing = Object.keys(modelPricing).length > 0
 
-  const totalRequestPages = Math.max(1, Math.ceil(requestDetails.length / REQUESTS_PER_PAGE))
+  const totalRequestPages = Math.max(1, Math.ceil(requestDetails.length / requestsPerPage))
   const pagedRequestDetails = requestDetails.slice(
-    (requestPage - 1) * REQUESTS_PER_PAGE,
-    requestPage * REQUESTS_PER_PAGE
+    (requestPage - 1) * requestsPerPage,
+    requestPage * requestsPerPage
   )
 
   useEffect(() => {
     setRequestPage(1)
-  }, [activeTab, requestDetails.length])
+  }, [activeTab, requestDetails.length, requestsPerPage])
 
   return (
     <div className="min-h-screen pt-10 pb-20 px-6 bg-white">
@@ -1274,6 +1276,26 @@ function App({ openCodeEnabled }) {
 
             {activeTab === 'requests' && (
               <div className="border border-[#e5e5e5] rounded-xl overflow-hidden">
+                <div className="flex items-center justify-between gap-3 border-b border-[#e5e5e5] bg-[#fafafa] px-4 py-3">
+                  <p className="text-sm text-[#6e6e80]">
+                    共 {formatNumber(requestDetails.length)} 条请求记录
+                  </p>
+                  <label className="flex items-center gap-2 text-sm text-[#6e6e80]">
+                    每页
+                    <select
+                      value={requestsPerPage}
+                      onChange={(event) => setRequestsPerPage(Number(event.target.value) || DEFAULT_REQUESTS_PER_PAGE)}
+                      className="rounded-md border border-[#e5e5e5] bg-white px-2 py-1 text-sm text-[#0d0d0d] focus:outline-none focus:border-[#0d0d0d]"
+                    >
+                      {REQUESTS_PER_PAGE_OPTIONS.map((option) => (
+                        <option key={option} value={option}>
+                          {option}
+                        </option>
+                      ))}
+                    </select>
+                    行
+                  </label>
+                </div>
                 <div className="overflow-x-auto">
                   <table className="w-full min-w-[1280px]">
                     <thead className="bg-[#f7f7f8] border-b border-[#e5e5e5]">

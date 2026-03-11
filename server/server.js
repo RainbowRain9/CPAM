@@ -29,10 +29,9 @@ const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const AUTH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 8;
-const APP_AUTH_PASSWORD = process.env.API_CENTER_ADMIN_PASSWORD || '';
 const APP_AUTH_SECRET =
   process.env.API_CENTER_SESSION_SECRET ||
-  crypto.createHash('sha256').update(`api-center:${APP_AUTH_PASSWORD || 'unset'}`).digest('hex');
+  crypto.createHash('sha256').update('api-center:session-secret').digest('hex');
 const loginAttempts = new Map();
 
 // 加载/保存设置
@@ -51,24 +50,6 @@ function saveSettings(settings) {
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf-8');
 }
 
-function isAppAuthConfigured() {
-  return Boolean(APP_AUTH_PASSWORD);
-}
-
-function shouldBlockWithoutAuthConfig() {
-  return !DEV_MODE;
-}
-
-function hashText(value) {
-  return crypto.createHash('sha256').update(String(value || '')).digest();
-}
-
-function safeTextEqual(left, right) {
-  const leftHash = hashText(left);
-  const rightHash = hashText(right);
-  return crypto.timingSafeEqual(leftHash, rightHash);
-}
-
 function getClientIp(req) {
   const forwarded = req.headers['x-forwarded-for'];
   if (typeof forwarded === 'string' && forwarded.trim()) {
@@ -78,11 +59,7 @@ function getClientIp(req) {
 }
 
 function getAuthVersion() {
-  return crypto
-    .createHash('sha256')
-    .update(APP_AUTH_PASSWORD)
-    .digest('hex')
-    .slice(0, 24);
+  return 'cli-proxy-management-key';
 }
 
 function signAuthPayload(encodedPayload) {
@@ -143,10 +120,6 @@ function getAuthTokenFromRequest(req) {
 }
 
 function isAuthenticatedRequest(req) {
-  if (!isAppAuthConfigured()) {
-    return !shouldBlockWithoutAuthConfig();
-  }
-
   return Boolean(readAuthPayload(getAuthTokenFromRequest(req)));
 }
 
@@ -186,26 +159,15 @@ function clearLoginFailures(ip) {
 }
 
 function getAuthStatusPayload(req) {
-  const passwordConfigured = isAppAuthConfigured();
-  const blocked = !passwordConfigured && shouldBlockWithoutAuthConfig();
   return {
     authenticated: isAuthenticatedRequest(req),
-    loginRequired: passwordConfigured,
-    blocked,
-    message: blocked
-      ? '服务端未配置 API_CENTER_ADMIN_PASSWORD，已禁止公开访问'
-      : ''
+    loginRequired: true,
+    blocked: false,
+    message: ''
   };
 }
 
 function requireAppAuth(req, res, next) {
-  if (!isAppAuthConfigured()) {
-    if (shouldBlockWithoutAuthConfig()) {
-      return res.status(503).json({ error: '服务端未配置 API_CENTER_ADMIN_PASSWORD' });
-    }
-    return next();
-  }
-
   if (isAuthenticatedRequest(req)) {
     return next();
   }
@@ -361,13 +323,6 @@ app.get('/api/auth/status', (req, res) => {
 });
 
 app.post('/api/auth/login', (req, res) => {
-  if (!isAppAuthConfigured()) {
-    if (shouldBlockWithoutAuthConfig()) {
-      return res.status(503).json({ error: '服务端未配置 API_CENTER_ADMIN_PASSWORD' });
-    }
-    return res.json({ success: true, bypassed: true });
-  }
-
   const ip = getClientIp(req);
   const rateLimitState = getLoginRateLimitState(ip);
   if (rateLimitState.blocked) {
@@ -377,21 +332,41 @@ app.post('/api/auth/login', (req, res) => {
     });
   }
 
-  const { password } = req.body || {};
-  const passwordValid = safeTextEqual(password || '', APP_AUTH_PASSWORD);
+  const settings = loadSettings();
+  const requestedUrl = req.body?.cliProxyUrl || settings?.cliProxyUrl || 'http://localhost:8317';
+  const password = String(req.body?.password || '').trim();
 
-  if (!passwordValid) {
-    recordLoginFailure(ip);
-    return res.status(401).json({ error: '访问密码错误' });
-  }
+  validateCliProxyManagementAccess(requestedUrl, password)
+    .then((validation) => {
+      if (!validation.ok) {
+        recordLoginFailure(ip);
+        return res.status(validation.status || 400).json({ error: validation.error });
+      }
 
-  clearLoginFailures(ip);
-  const authToken = createAuthToken();
-  return res.json({
-    success: true,
-    token: authToken.token,
-    expiresAt: authToken.expiresAt
-  });
+      const currentSettings = loadSettings();
+      if (currentSettings) {
+        const currentBaseUrl = normalizeCliProxyBaseUrl(currentSettings.cliProxyUrl || '');
+        if (currentBaseUrl === validation.normalizedBaseUrl && currentSettings.cliProxyKey !== password) {
+          currentSettings.cliProxyKey = password;
+          saveSettings(currentSettings);
+          updateCliProxyVars();
+        }
+      }
+
+      clearLoginFailures(ip);
+      const authToken = createAuthToken();
+      return res.json({
+        success: true,
+        token: authToken.token,
+        expiresAt: authToken.expiresAt,
+        cliProxyUrl: validation.normalizedBaseUrl
+      });
+    })
+    .catch((error) => {
+      console.error('登录校验失败:', error);
+      recordLoginFailure(ip);
+      return res.status(500).json({ error: '登录校验失败' });
+    });
 });
 
 app.use('/api', (req, res, next) => {

@@ -95,8 +95,8 @@ describe('RootApp', () => {
           user: { username: 'admin' },
         }))
       }
-      if (path === '/api/settings') {
-        return Promise.resolve(jsonResponse({ configured: false }))
+      if (path === '/api/cpa-instances') {
+        return Promise.resolve(jsonResponse({ instances: [] }))
       }
       return Promise.reject(new Error(`Unexpected path: ${path}`))
     })
@@ -119,11 +119,22 @@ describe('RootApp', () => {
           user: { username: 'admin' },
         }))
       }
-      if (path === '/api/settings') {
+      if (path === '/api/cpa-instances') {
         return Promise.resolve(jsonResponse({
-          configured: true,
-          cliProxyUrl: 'http://localhost:8317',
-          syncInterval: 5,
+          instances: [{
+            id: 1,
+            name: 'Primary',
+            baseUrl: 'http://localhost:8317',
+            syncInterval: 5,
+            isActive: true,
+            isEnabled: true,
+            status: 'healthy',
+            statusMessage: '',
+            lastCheckedAt: null,
+            lastSyncAt: null,
+            lastExportAt: null,
+            apiKeyPreview: 'cli-***min',
+          }],
         }))
       }
       return Promise.reject(new Error(`Unexpected path: ${path}`))

@@ -1,5 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import { apiFetch } from '../auth.js'
+import {
+  type CpaInstance,
+  fetchCpaInstances,
+  getActiveCpaInstance,
+  getCpaInstanceStatusClass,
+  getCpaInstanceStatusLabel,
+} from '../cpaInstances'
 import { ActionButton, AppShell, EmptyState, GlassPanel, InlineIcon, SectionFrame } from '../components/ui'
 import { useI18n } from '../i18n/useI18n'
 import { buildPrimaryNav } from '../navigation'
@@ -142,6 +149,7 @@ function OverlayDialog({
 
 export default function CodexPage() {
   const [accounts, setAccounts] = useState<Account[]>([])
+  const [currentInstance, setCurrentInstance] = useState<CpaInstance | null>(null)
   const [loading, setLoading] = useState(true)
   const [checkingStatus, setCheckingStatus] = useState(false)
   const [checkingQuota, setCheckingQuota] = useState(false)
@@ -153,6 +161,7 @@ export default function CodexPage() {
     invalid: number
     invalidAccounts: Array<{ name?: string; email?: string }>
   }>(null)
+  const [pageError, setPageError] = useState('')
   const [deleting, setDeleting] = useState(false)
   const [showCleanModal, setShowCleanModal] = useState(false)
   const [cleanThreshold, setCleanThreshold] = useState({ quota: 20, days: 5 })
@@ -162,13 +171,22 @@ export default function CodexPage() {
 
   const fetchAccounts = async () => {
     try {
+      const nextInstances = await fetchCpaInstances()
+      setCurrentInstance(getActiveCpaInstance(nextInstances))
+
       const res = await apiFetch('/api/codex/accounts')
       if (res.ok) {
         const data = await res.json()
         setAccounts(data)
+        setPageError('')
+      } else {
+        const data = await res.json().catch(() => ({}))
+        setAccounts([])
+        setPageError(data.error || t('Failed to load CodeX accounts'))
       }
     } catch (error) {
       console.error('Failed to fetch CodeX accounts:', error)
+      setPageError((error as Error).message || t('Failed to load CodeX accounts'))
     } finally {
       setLoading(false)
     }
@@ -341,9 +359,15 @@ export default function CodexPage() {
                 {t('Inspect account health, review quota windows, and remove low-value seats without leaving the monochrome shell.')}
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
+                {currentInstance ? <span className="chip">{t('Active instance')}: {currentInstance.name}</span> : null}
                 <span className="chip">{t('Live accounts')}: {accounts.filter((account) => account.checkStatus === 'valid').length}</span>
                 <span className="chip">{t('Quota cleanup')}: {cleanableAccounts.length}</span>
                 {results?.deleted ? <span className="chip">{t('Deleted')}: {String(results.deleted)}</span> : null}
+                {currentInstance ? (
+                  <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${getCpaInstanceStatusClass(currentInstance.status)}`}>
+                    {getCpaInstanceStatusLabel(currentInstance.status, t)}
+                  </span>
+                ) : null}
               </div>
             </div>
 
@@ -377,6 +401,8 @@ export default function CodexPage() {
             </div>
           </div>
         </GlassPanel>
+
+        {pageError ? <p className="text-sm text-[var(--danger)]">{pageError}</p> : null}
 
         <SectionFrame
           title={t('CodeX')}

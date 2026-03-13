@@ -1,6 +1,8 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react'
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { apiFetch, notifyAuthChanged, subscribeToAuthChanges } from './auth.js'
+import type { CpaInstance } from './cpaInstances'
+import { fetchCpaInstances } from './cpaInstances'
 import { I18nProvider } from './i18n/I18nProvider'
 import { useI18n } from './i18n/useI18n'
 import { ActionButton, AppShell } from './components/ui'
@@ -22,11 +24,6 @@ type AuthState = {
   user: {
     username: string
   } | null
-}
-
-type SettingsState = {
-  cliProxyUrl: string
-  syncInterval: number
 }
 
 function LoadingScreen() {
@@ -57,9 +54,9 @@ function RootContent() {
   })
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [showSetup, setShowSetup] = useState(false)
-  const [currentSettings, setCurrentSettings] = useState<SettingsState | null>(null)
+  const [instances, setInstances] = useState<CpaInstance[]>([])
 
-  const waitingForSettings =
+  const waitingForInstances =
     authState.checked &&
     !authState.bootstrapRequired &&
     authState.authenticated &&
@@ -97,34 +94,21 @@ function RootContent() {
     }
   }
 
-  const fetchSettings = async () => {
+  const fetchInstances = async () => {
     try {
-      const response = await apiFetch('/api/settings')
-      if (response.status === 401) {
+      const nextInstances = await fetchCpaInstances()
+      setInstances(nextInstances)
+      setConfigured(nextInstances.some((instance) => instance.isEnabled))
+      return nextInstances
+    } catch (error) {
+      if ((error as Error & { status?: number }).status === 401) {
         setConfigured(null)
-        setCurrentSettings(null)
+        setInstances([])
         return null
       }
 
-      const data = await response.json().catch(() => ({}))
-      if (!response.ok) {
-        throw new Error(data.error || t('Failed to load settings'))
-      }
-
-      setConfigured(Boolean(data.configured))
-      if (data.configured) {
-        setCurrentSettings({
-          cliProxyUrl: data.cliProxyUrl,
-          syncInterval: data.syncInterval,
-        })
-      } else {
-        setCurrentSettings(null)
-      }
-
-      return data
-    } catch {
       setConfigured(false)
-      setCurrentSettings(null)
+      setInstances([])
       return null
     }
   }
@@ -133,12 +117,12 @@ function RootContent() {
     const nextAuthState = await fetchAuthStatus()
     if (nextAuthState.bootstrapRequired || !nextAuthState.authenticated) {
       setConfigured(null)
-      setCurrentSettings(null)
+      setInstances([])
       setShowSetup(false)
       return
     }
 
-    await fetchSettings()
+    await fetchInstances()
   }
 
   useEffect(() => {
@@ -182,7 +166,7 @@ function RootContent() {
     )
   }, [authState.authenticated, authState.user?.username, t])
 
-  if (!authState.checked || waitingForSettings) {
+  if (!authState.checked || waitingForInstances) {
     return <LoadingScreen />
   }
 
@@ -206,10 +190,10 @@ function RootContent() {
     return (
       <Suspense fallback={<LoadingScreen />}>
         <SetupPage
-          initialSettings={currentSettings}
+          instances={instances}
           onComplete={async () => {
             setShowSetup(false)
-            await fetchSettings()
+            await fetchInstances()
           }}
           onCancel={configured ? () => setShowSetup(false) : undefined}
           onLogout={handleLogout}

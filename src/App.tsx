@@ -18,6 +18,14 @@ import {
   migrateServerPricing,
   persistLocalModelPricingState,
 } from './modelPricingState'
+import {
+  buildScopedCacheKey,
+  type CpaInstance,
+  fetchCpaInstances,
+  getActiveCpaInstance,
+  getCpaInstanceStatusClass,
+  getCpaInstanceStatusLabel,
+} from './cpaInstances'
 import { buildPrimaryNav } from './navigation'
 import { useTheme } from './theme/useTheme'
 
@@ -242,11 +250,13 @@ function buildRequestDetails(usage, pricingMap) {
         const timestampMs = Date.parse(detail?.timestamp || '')
 
         details.push({
-          id: `${endpoint}-${modelName}-${detail?.timestamp || index}-${index}`,
+          id: `${detail?.instance_id || 'all'}-${endpoint}-${modelName}-${detail?.timestamp || index}-${index}`,
           endpoint,
           model: modelName,
           source: detail?.source || '',
           authIndex: detail?.auth_index ?? '',
+          instanceId: detail?.instance_id ?? null,
+          instanceName: detail?.instance_name || '',
           timestamp: detail?.timestamp || '',
           timestampMs: Number.isNaN(timestampMs) ? 0 : timestampMs,
           failed: detail?.failed === true,
@@ -669,8 +679,8 @@ function resolveCredentialStatInfo(detail, keyProviderCache) {
     ? ''
     : String(detail.authIndex)
   const sourceKey = detail.source || ''
-  const authInfo = authIndexKey ? keyProviderCache?.[authIndexKey] : null
-  const sourceInfo = sourceKey ? keyProviderCache?.[sourceKey] : null
+  const authInfo = authIndexKey ? keyProviderCache?.[buildScopedCacheKey(detail.instanceId, 'auth', authIndexKey)] : null
+  const sourceInfo = sourceKey ? keyProviderCache?.[buildScopedCacheKey(detail.instanceId, 'source', sourceKey)] : null
   const cacheInfo = authInfo || sourceInfo || null
 
   const displayName =
@@ -682,16 +692,24 @@ function resolveCredentialStatInfo(detail, keyProviderCache) {
     (authIndexKey ? `认证索引 ${authIndexKey}` : '') ||
     (sourceKey ? maskSensitiveValue(sourceKey) : '未知凭证')
 
-  const subtitle = authIndexKey
-    ? `auth_index: ${authIndexKey}`
-    : sourceKey
-      ? `source: ${maskSensitiveValue(sourceKey)}`
-      : ''
+  const subtitleParts = []
+  if (detail.instanceName) {
+    subtitleParts.push(`实例: ${detail.instanceName}`)
+  }
+  if (authIndexKey) {
+    subtitleParts.push(`auth_index: ${authIndexKey}`)
+  } else if (sourceKey) {
+    subtitleParts.push(`source: ${maskSensitiveValue(sourceKey)}`)
+  }
 
   return {
-    key: authIndexKey ? `auth:${authIndexKey}` : sourceKey ? `source:${sourceKey}` : `unknown:${detail.id}`,
+    key: authIndexKey
+      ? `instance:${detail.instanceId}:auth:${authIndexKey}`
+      : sourceKey
+        ? `instance:${detail.instanceId}:source:${sourceKey}`
+        : `unknown:${detail.id}`,
     displayName,
-    subtitle,
+    subtitle: subtitleParts.join(' · '),
     type: authInfo?.channel || sourceInfo?.channel || '',
   }
 }
@@ -750,8 +768,8 @@ function resolveSourceInfo(request, keyProviderCache) {
     : String(request.authIndex)
 
   const cacheInfo =
-    keyProviderCache?.[authIndexKey] ||
-    keyProviderCache?.[request.source] ||
+    keyProviderCache?.[buildScopedCacheKey(request.instanceId, 'auth', authIndexKey)] ||
+    keyProviderCache?.[buildScopedCacheKey(request.instanceId, 'source', request.source)] ||
     null
 
   if (!cacheInfo) {
@@ -827,6 +845,10 @@ function App() {
   const [syncing, setSyncing] = useState(false)
   const [syncMessage, setSyncMessage] = useState('')
   const [syncError, setSyncError] = useState('')
+  const [instances, setInstances] = useState<CpaInstance[]>([])
+  const [usageScope, setUsageScope] = useState<'instance' | 'all'>('instance')
+  const [selectedInstanceId, setSelectedInstanceId] = useState<number | ''>('')
+  const [viewInstanceName, setViewInstanceName] = useState('')
   const navItems = useMemo(() => buildPrimaryNav(t), [t])
   const chartTheme = useMemo(() => (
     resolvedTheme === 'dark'
@@ -851,15 +873,56 @@ function App() {
     () => getServiceHealthPalette(resolvedTheme),
     [resolvedTheme]
   )
+  const activeInstance = useMemo(() => getActiveCpaInstance(instances), [instances])
+  const selectedInstance = useMemo(() => {
+    const numericId = Number(selectedInstanceId)
+    if (Number.isFinite(numericId)) {
+      return instances.find((instance) => instance.id === numericId) || activeInstance || null
+    }
+    return activeInstance || null
+  }, [activeInstance, instances, selectedInstanceId])
+  const currentStatusInstance = usageScope === 'all' ? activeInstance : selectedInstance
+  const currentViewLabel = usageScope === 'all'
+    ? t('Total summary')
+    : viewInstanceName || selectedInstance?.name || t('Current instance')
+  const manualSyncDisabled = syncing || (usageScope === 'instance' && !selectedInstance?.isEnabled)
 
-  const fetchUsage = async () => {
+  const resolveSelectedInstanceId = (nextInstances: CpaInstance[], requestedId: number | '' = selectedInstanceId) => {
+    const numericId = Number(requestedId)
+    if (Number.isFinite(numericId) && nextInstances.some((instance) => instance.id === numericId)) {
+      return numericId
+    }
+
+    return getActiveCpaInstance(nextInstances)?.id || nextInstances[0]?.id || null
+  }
+
+  const fetchUsage = async (nextScope: 'instance' | 'all' = usageScope, requestedInstanceId: number | '' = selectedInstanceId) => {
     try {
-      const res = await apiFetch('/api/usage')
+      const nextInstances = await fetchCpaInstances()
+      setInstances(nextInstances)
+
+      const resolvedInstanceId = resolveSelectedInstanceId(nextInstances, requestedInstanceId)
+      if (nextScope === 'instance' && resolvedInstanceId !== null && resolvedInstanceId !== selectedInstanceId) {
+        setSelectedInstanceId(resolvedInstanceId)
+      }
+
+      const params = new URLSearchParams()
+      if (nextScope === 'all') {
+        params.set('scope', 'all')
+      } else {
+        params.set('scope', 'instance')
+        if (resolvedInstanceId !== null) {
+          params.set('instanceId', String(resolvedInstanceId))
+        }
+      }
+
+      const res = await apiFetch(`/api/usage?${params.toString()}`)
       if (res.ok) {
         const data = await res.json()
         setUsage(data.usage)
         setLastExport(data.lastExport)
         setKeyProviderCache(data.keyProviderCache || {})
+        setViewInstanceName(data.instanceName || '')
 
         if (!pricingSeededRef.current) {
           const migratedPricing = migrateServerPricing(data.modelPricing || {})
@@ -871,16 +934,20 @@ function App() {
       }
     } catch (e) {
       console.error('获取使用记录失败:', e)
+      setUsage(null)
     } finally {
       setLoading(false)
     }
   }
 
   useEffect(() => {
-    fetchUsage()
-    const timer = setInterval(fetchUsage, 30000)
+    setLoading(true)
+    fetchUsage(usageScope, selectedInstanceId)
+    const timer = setInterval(() => {
+      fetchUsage(usageScope, selectedInstanceId)
+    }, 30000)
     return () => clearInterval(timer)
-  }, [])
+  }, [usageScope, selectedInstanceId])
 
   useEffect(() => {
     persistLocalModelPricingState({
@@ -896,7 +963,7 @@ function App() {
       try {
         const data = JSON.parse(event.data)
         if (data?.type === 'usage-updated') {
-          fetchUsage()
+          fetchUsage(usageScope, selectedInstanceId)
         }
       } catch (e) {
         console.warn('SSE 消息解析失败:', e)
@@ -905,7 +972,7 @@ function App() {
     return () => {
       es.close()
     }
-  }, [])
+  }, [usageScope, selectedInstanceId])
 
   const handleManualSync = async () => {
     setSyncing(true)
@@ -913,17 +980,26 @@ function App() {
     setSyncMessage('')
 
     try {
-      const res = await apiFetch('/api/usage/export-now', { method: 'POST' })
+      const params = new URLSearchParams()
+      if (usageScope === 'all') {
+        params.set('scope', 'all')
+      } else if (selectedInstance) {
+        params.set('scope', 'instance')
+        params.set('instanceId', String(selectedInstance.id))
+      }
+
+      const res = await apiFetch(`/api/usage/export-now?${params.toString()}`, { method: 'POST' })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
         throw new Error(data.error || `手动同步失败：${res.status}`)
       }
       if (data.usage) setUsage(data.usage)
       if (data.lastExport) setLastExport(data.lastExport)
-      setSyncMessage('手动同步成功')
-      fetchUsage()
+      setViewInstanceName(data.instanceName || '')
+      setSyncMessage(t('Manual sync succeeded'))
+      fetchUsage(usageScope, selectedInstance?.id || selectedInstanceId)
     } catch (e) {
-      setSyncError(e.message || '手动同步失败')
+      setSyncError((e as Error).message || t('Manual sync failed'))
     } finally {
       setSyncing(false)
     }
@@ -1042,21 +1118,64 @@ function App() {
               </p>
               <div className="mt-4 flex flex-wrap gap-2">
                 <span className="chip">{t('Last updated')}: {formatTime(lastExport)}</span>
+                <span className="chip">{t('View')}: {currentViewLabel}</span>
+                {activeInstance ? <span className="chip">{t('Active instance')}: {activeInstance.name}</span> : null}
                 <span className="chip">{t('Active tab')}: {activeTab}</span>
                 <span className="chip">{t('Requests')}: {formatNumber(overviewStats.totalRequests)}</span>
+                {currentStatusInstance ? (
+                  <span className={`inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium ${getCpaInstanceStatusClass(currentStatusInstance.status)}`}>
+                    {getCpaInstanceStatusLabel(currentStatusInstance.status, t)}
+                  </span>
+                ) : null}
               </div>
             </div>
 
-            <div className="flex flex-wrap gap-2 lg:justify-end">
+            <div className="flex flex-col gap-3 lg:items-end">
+              <div className="flex flex-wrap gap-2 lg:justify-end">
+                <ActionButton
+                  size="sm"
+                  variant={usageScope === 'instance' ? 'primary' : 'secondary'}
+                  onClick={() => setUsageScope('instance')}
+                >
+                  {t('Current instance')}
+                </ActionButton>
+                <ActionButton
+                  size="sm"
+                  variant={usageScope === 'all' ? 'primary' : 'secondary'}
+                  onClick={() => setUsageScope('all')}
+                >
+                  {t('Total summary')}
+                </ActionButton>
+              </div>
+
+              {usageScope === 'instance' && instances.length > 0 ? (
+                <label className="flex flex-col gap-2 text-sm text-[var(--text-secondary)] lg:min-w-[260px]">
+                  <span>{t('Instance view')}</span>
+                  <select
+                    value={selectedInstance?.id || ''}
+                    onChange={(event) => setSelectedInstanceId(Number(event.target.value) || '')}
+                    className="field-select rounded-[16px] px-3 py-2"
+                  >
+                    {instances.map((instance) => (
+                      <option key={instance.id} value={instance.id}>
+                        {instance.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              ) : null}
+
+              <div className="flex flex-wrap gap-2 lg:justify-end">
               <ActionButton
                 onClick={handleManualSync}
-                disabled={syncing}
+                disabled={manualSyncDisabled}
                 variant="primary"
                 icon={<InlineIcon name="refresh" className={syncing ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />}
                 loading={syncing}
               >
                 {syncing ? t('Syncing...') : t('Manual sync')}
               </ActionButton>
+              </div>
             </div>
           </div>
         </div>

@@ -1,21 +1,27 @@
 import { Suspense, lazy, useEffect, useMemo, useState } from 'react'
 import { HashRouter, Navigate, Route, Routes } from 'react-router-dom'
-import { apiFetch, clearStoredAppAuth, subscribeToAuthChanges } from './auth.js'
+import { apiFetch, notifyAuthChanged, subscribeToAuthChanges } from './auth.js'
 import { I18nProvider } from './i18n/I18nProvider'
 import { useI18n } from './i18n/useI18n'
 import { ActionButton, AppShell } from './components/ui'
 import { ThemeProvider } from './theme/ThemeProvider'
 
 const DashboardPage = lazy(() => import('./App'))
+const BootstrapAdminPage = lazy(() => import('./pages/BootstrapAdminPage'))
+const LoginPage = lazy(() => import('./pages/LoginPage'))
 const SetupPage = lazy(() => import('./pages/SetupPage'))
 const CodexPage = lazy(() => import('./pages/CodexPage'))
 
 type AuthState = {
   checked: boolean
+  bootstrapRequired: boolean
   authenticated: boolean
   loginRequired: boolean
   blocked: boolean
   message: string
+  user: {
+    username: string
+  } | null
 }
 
 type SettingsState = {
@@ -39,47 +45,52 @@ function LoadingScreen() {
 }
 
 function RootContent() {
+  const { t } = useI18n()
   const [authState, setAuthState] = useState<AuthState>({
     checked: false,
+    bootstrapRequired: false,
     authenticated: false,
     loginRequired: false,
     blocked: false,
     message: '',
+    user: null,
   })
   const [configured, setConfigured] = useState<boolean | null>(null)
   const [showSetup, setShowSetup] = useState(false)
   const [currentSettings, setCurrentSettings] = useState<SettingsState | null>(null)
-  const { t } = useI18n()
 
   const waitingForSettings =
     authState.checked &&
-    !authState.blocked &&
-    (!authState.loginRequired || authState.authenticated) &&
+    !authState.bootstrapRequired &&
+    authState.authenticated &&
     configured === null
 
   const fetchAuthStatus = async () => {
     try {
       const response = await apiFetch('/api/auth/status')
       const data = await response.json().catch(() => ({}))
+
       const nextAuthState = {
         checked: true,
+        bootstrapRequired: Boolean(data.bootstrapRequired),
         authenticated: Boolean(data.authenticated),
         loginRequired: Boolean(data.loginRequired),
         blocked: Boolean(data.blocked),
         message: data.message || '',
+        user: data.user?.username ? { username: data.user.username } : null,
       }
-      if (nextAuthState.loginRequired && !nextAuthState.authenticated) {
-        clearStoredAppAuth({ silent: true })
-      }
+
       setAuthState(nextAuthState)
       return nextAuthState
     } catch {
       const fallbackState = {
         checked: true,
+        bootstrapRequired: false,
         authenticated: false,
         loginRequired: true,
         blocked: true,
-        message: '无法连接认证服务，请检查服务端是否正常运行。',
+        message: t('Authentication service is currently unreachable.'),
+        user: null,
       }
       setAuthState(fallbackState)
       return fallbackState
@@ -90,7 +101,6 @@ function RootContent() {
     try {
       const response = await apiFetch('/api/settings')
       if (response.status === 401) {
-        setAuthState((prev) => ({ ...prev, authenticated: false, checked: true }))
         setConfigured(null)
         setCurrentSettings(null)
         return null
@@ -98,7 +108,7 @@ function RootContent() {
 
       const data = await response.json().catch(() => ({}))
       if (!response.ok) {
-        throw new Error(data.error || '获取设置失败')
+        throw new Error(data.error || t('Failed to load settings'))
       }
 
       setConfigured(Boolean(data.configured))
@@ -121,53 +131,88 @@ function RootContent() {
 
   const refreshAppState = async () => {
     const nextAuthState = await fetchAuthStatus()
-    if (nextAuthState.blocked) {
+    if (nextAuthState.bootstrapRequired || !nextAuthState.authenticated) {
       setConfigured(null)
       setCurrentSettings(null)
+      setShowSetup(false)
       return
     }
-    if (nextAuthState.loginRequired && !nextAuthState.authenticated) {
-      setConfigured(null)
-      setCurrentSettings(null)
-      return
-    }
+
     await fetchSettings()
   }
 
   useEffect(() => {
-    refreshAppState()
+    void refreshAppState()
     const unsubscribe = subscribeToAuthChanges(() => {
-      refreshAppState()
+      void refreshAppState()
     })
     return unsubscribe
   }, [])
 
-  const footer = useMemo(() => (
-    <div className="px-2 pb-4 text-center">
-      <ActionButton size="sm" variant="ghost" onClick={() => setShowSetup(true)}>
-        {t('Open setup')}
-      </ActionButton>
-    </div>
-  ), [t])
+  const handleLogout = async () => {
+    try {
+      await apiFetch('/api/auth/logout', { method: 'POST' })
+    } catch {
+      // ignore transport failure and still refresh local auth state
+    } finally {
+      setShowSetup(false)
+      notifyAuthChanged()
+    }
+  }
+
+  const footer = useMemo(() => {
+    if (!authState.authenticated) {
+      return null
+    }
+
+    return (
+      <div className="px-2 pb-4 text-center">
+        <p className="mb-3 text-xs faint-text">
+          {t('Signed in as {username}', { username: authState.user?.username || '' })}
+        </p>
+        <div className="flex justify-center gap-2">
+          <ActionButton size="sm" variant="ghost" onClick={() => setShowSetup(true)}>
+            {t('Open setup')}
+          </ActionButton>
+          <ActionButton size="sm" variant="ghost" onClick={() => void handleLogout()}>
+            {t('Sign out')}
+          </ActionButton>
+        </div>
+      </div>
+    )
+  }, [authState.authenticated, authState.user?.username, t])
 
   if (!authState.checked || waitingForSettings) {
     return <LoadingScreen />
   }
 
-  if (authState.blocked || (authState.loginRequired && !authState.authenticated) || !configured || showSetup) {
+  if (authState.bootstrapRequired) {
+    return (
+      <Suspense fallback={<LoadingScreen />}>
+        <BootstrapAdminPage onComplete={refreshAppState} />
+      </Suspense>
+    )
+  }
+
+  if (!authState.authenticated) {
+    return (
+      <Suspense fallback={<LoadingScreen />}>
+        <LoginPage blocked={authState.blocked} blockedMessage={authState.message} onComplete={refreshAppState} />
+      </Suspense>
+    )
+  }
+
+  if (!configured || showSetup) {
     return (
       <Suspense fallback={<LoadingScreen />}>
         <SetupPage
           initialSettings={currentSettings}
-          authRequired={authState.loginRequired}
-          authenticated={authState.authenticated}
-          blocked={authState.blocked}
-          blockedMessage={authState.message}
           onComplete={async () => {
-            setConfigured(true)
             setShowSetup(false)
             await fetchSettings()
           }}
+          onCancel={configured ? () => setShowSetup(false) : undefined}
+          onLogout={handleLogout}
         />
       </Suspense>
     )

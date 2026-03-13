@@ -1,13 +1,11 @@
 const express = require('express');
-const cors = require('cors');
-const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { createProxyMiddleware } = require('http-proxy-middleware');
-const usageDb = require('./db');
+const { createUsageDb } = require('./db');
+const { createLocalAuth } = require('./localAuth');
 const {
   hasDefinedIdentifier,
-  resolveAppAuthSecret,
   shouldUseViteProxy,
 } = require('./runtime');
 
@@ -17,6 +15,15 @@ const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost
 const DATA_DIR = path.join(__dirname, '..', 'data');
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const DEV_MODE = shouldUseViteProxy();
+const usageDb = createUsageDb({ dataDir: DATA_DIR });
+const {
+  router: authRouter,
+  applyAuthState,
+  requireAppAuth,
+} = createLocalAuth({
+  usageDb,
+  isProduction: process.env.NODE_ENV === 'production',
+});
 
 // usage 实时更新推送（SSE）
 const usageStreamClients = new Set();
@@ -32,12 +39,6 @@ function broadcastUsageUpdate(payload = {}) {
   }
 }
 
-const AUTH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
-const LOGIN_MAX_ATTEMPTS = 8;
-const APP_AUTH_SECRET = resolveAppAuthSecret({ dataDir: DATA_DIR });
-const loginAttempts = new Map();
-
 // 加载/保存设置
 function loadSettings() {
   try {
@@ -52,131 +53,6 @@ function loadSettings() {
 
 function saveSettings(settings) {
   fs.writeFileSync(SETTINGS_FILE, JSON.stringify(settings, null, 2), 'utf-8');
-}
-
-function getClientIp(req) {
-  const forwarded = req.headers['x-forwarded-for'];
-  if (typeof forwarded === 'string' && forwarded.trim()) {
-    return forwarded.split(',')[0].trim();
-  }
-  return req.socket?.remoteAddress || 'unknown';
-}
-
-function getAuthVersion() {
-  return 'cli-proxy-management-key';
-}
-
-function signAuthPayload(encodedPayload) {
-  return crypto.createHmac('sha256', APP_AUTH_SECRET).update(encodedPayload).digest('hex');
-}
-
-function createAuthToken() {
-  const payload = {
-    ver: getAuthVersion(),
-    exp: Date.now() + AUTH_TOKEN_TTL_MS,
-    nonce: crypto.randomBytes(16).toString('hex')
-  };
-  const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
-  return {
-    token: `${encodedPayload}.${signAuthPayload(encodedPayload)}`,
-    expiresAt: payload.exp
-  };
-}
-
-function readAuthPayload(token) {
-  if (!token || typeof token !== 'string') return null;
-
-  const separatorIndex = token.lastIndexOf('.');
-  if (separatorIndex <= 0) return null;
-
-  const encodedPayload = token.slice(0, separatorIndex);
-  const signature = token.slice(separatorIndex + 1);
-  const expectedSignature = signAuthPayload(encodedPayload);
-
-  if (signature.length !== expectedSignature.length) return null;
-  if (!crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedSignature))) {
-    return null;
-  }
-
-  try {
-    const parsed = JSON.parse(Buffer.from(encodedPayload, 'base64url').toString('utf-8'));
-    if (!parsed || typeof parsed !== 'object') return null;
-    if (typeof parsed.exp !== 'number' || !Number.isFinite(parsed.exp)) return null;
-    if (parsed.ver !== getAuthVersion()) return null;
-    if (parsed.exp <= Date.now()) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
-}
-
-function getAuthTokenFromRequest(req) {
-  const authHeader = req.headers.authorization;
-  if (typeof authHeader === 'string' && authHeader.startsWith('Bearer ')) {
-    return authHeader.slice(7).trim();
-  }
-
-  if (typeof req.query?.access_token === 'string' && req.query.access_token.trim()) {
-    return req.query.access_token.trim();
-  }
-
-  return '';
-}
-
-function isAuthenticatedRequest(req) {
-  return Boolean(readAuthPayload(getAuthTokenFromRequest(req)));
-}
-
-function getLoginRateLimitState(ip) {
-  const entry = loginAttempts.get(ip);
-  if (!entry) {
-    return { blocked: false, remaining: LOGIN_MAX_ATTEMPTS };
-  }
-
-  if (Date.now() - entry.firstAttemptAt > LOGIN_RATE_LIMIT_WINDOW_MS) {
-    loginAttempts.delete(ip);
-    return { blocked: false, remaining: LOGIN_MAX_ATTEMPTS };
-  }
-
-  const blocked = entry.count >= LOGIN_MAX_ATTEMPTS;
-  return {
-    blocked,
-    retryAfterMs: blocked
-      ? Math.max(0, LOGIN_RATE_LIMIT_WINDOW_MS - (Date.now() - entry.firstAttemptAt))
-      : 0,
-    remaining: Math.max(0, LOGIN_MAX_ATTEMPTS - entry.count)
-  };
-}
-
-function recordLoginFailure(ip) {
-  const entry = loginAttempts.get(ip);
-  if (!entry || Date.now() - entry.firstAttemptAt > LOGIN_RATE_LIMIT_WINDOW_MS) {
-    loginAttempts.set(ip, { count: 1, firstAttemptAt: Date.now() });
-    return;
-  }
-
-  entry.count += 1;
-}
-
-function clearLoginFailures(ip) {
-  loginAttempts.delete(ip);
-}
-
-function getAuthStatusPayload(req) {
-  return {
-    authenticated: isAuthenticatedRequest(req),
-    loginRequired: true,
-    blocked: false,
-    message: ''
-  };
-}
-
-function requireAppAuth(req, res, next) {
-  if (isAuthenticatedRequest(req)) {
-    return next();
-  }
-
-  return res.status(401).json({ error: '请先登录', code: 'AUTH_REQUIRED' });
 }
 
 function normalizeCliProxyBaseUrl(baseUrl) {
@@ -317,69 +193,11 @@ function getSyncInterval() {
   return minutes * 60 * 1000;
 }
 
-app.use(cors());
 app.use(express.json());
 app.disable('x-powered-by');
 app.use(express.static(path.join(__dirname, '..', 'dist')));
-
-app.get('/api/auth/status', (req, res) => {
-  res.json(getAuthStatusPayload(req));
-});
-
-app.post('/api/auth/login', (req, res) => {
-  const ip = getClientIp(req);
-  const rateLimitState = getLoginRateLimitState(ip);
-  if (rateLimitState.blocked) {
-    const retryAfterSeconds = Math.ceil((rateLimitState.retryAfterMs || 0) / 1000);
-    return res.status(429).json({
-      error: `登录尝试过多，请 ${retryAfterSeconds} 秒后再试`
-    });
-  }
-
-  const settings = loadSettings();
-  const requestedUrl = req.body?.cliProxyUrl || settings?.cliProxyUrl || 'http://localhost:8317';
-  const password = String(req.body?.password || '').trim();
-
-  validateCliProxyManagementAccess(requestedUrl, password)
-    .then((validation) => {
-      if (!validation.ok) {
-        recordLoginFailure(ip);
-        return res.status(validation.status || 400).json({ error: validation.error });
-      }
-
-      const currentSettings = loadSettings();
-      if (currentSettings) {
-        const currentBaseUrl = normalizeCliProxyBaseUrl(currentSettings.cliProxyUrl || '');
-        if (currentBaseUrl === validation.normalizedBaseUrl && currentSettings.cliProxyKey !== password) {
-          currentSettings.cliProxyKey = password;
-          delete currentSettings.openCodeConfigPath;
-          saveSettings(currentSettings);
-          updateCliProxyVars();
-        }
-      }
-
-      clearLoginFailures(ip);
-      const authToken = createAuthToken();
-      return res.json({
-        success: true,
-        token: authToken.token,
-        expiresAt: authToken.expiresAt,
-        cliProxyUrl: validation.normalizedBaseUrl
-      });
-    })
-    .catch((error) => {
-      console.error('登录校验失败:', error);
-      recordLoginFailure(ip);
-      return res.status(500).json({ error: '登录校验失败' });
-    });
-});
-
-app.use('/api', (req, res, next) => {
-  if (req.path.startsWith('/auth/')) {
-    return next();
-  }
-  return requireAppAuth(req, res, next);
-});
+app.use('/api/auth', authRouter);
+app.use('/api', applyAuthState, requireAppAuth);
 
 app.get('/api/usage/stream', (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');

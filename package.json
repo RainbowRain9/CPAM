@@ -10,7 +10,8 @@
     "client": "vite --strictPort",
     "build": "vite build",
     "test": "vitest run",
-    "start": "node server/server.js"
+    "start": "node server/server.js",
+    "reset-admin-password": "node scripts/reset-admin-password.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.6.2",

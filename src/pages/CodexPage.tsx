@@ -140,7 +140,7 @@ function OverlayDialog({
   )
 }
 
-export default function CodexPage({ openCodeEnabled = false }: { openCodeEnabled?: boolean }) {
+export default function CodexPage() {
   const [accounts, setAccounts] = useState<Account[]>([])
   const [loading, setLoading] = useState(true)
   const [checkingStatus, setCheckingStatus] = useState(false)
@@ -158,7 +158,7 @@ export default function CodexPage({ openCodeEnabled = false }: { openCodeEnabled
   const [cleanThreshold, setCleanThreshold] = useState({ quota: 20, days: 5 })
   const { t, locale } = useI18n()
 
-  const navItems = useMemo(() => buildPrimaryNav(t, openCodeEnabled), [openCodeEnabled, t])
+  const navItems = useMemo(() => buildPrimaryNav(t), [t])
 
   const fetchAccounts = async () => {
     try {

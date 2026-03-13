@@ -23,10 +23,6 @@ vi.mock('./pages/CodexPage', () => ({
   default: () => <div>Mock Codex</div>,
 }))
 
-vi.mock('./pages/OpenCodePage', () => ({
-  default: () => <div>Mock OpenCode</div>,
-}))
-
 function jsonResponse(payload: unknown, status = 200) {
   return new Response(JSON.stringify(payload), {
     status,
@@ -70,7 +66,6 @@ describe('RootApp', () => {
           configured: true,
           cliProxyUrl: 'http://localhost:8317',
           syncInterval: 5,
-          openCodeConfigPath: '/tmp/opencode',
         }))
       }
       return Promise.reject(new Error(`Unexpected path: ${path}`))

@@ -10,7 +10,6 @@ type SetupPageProps = {
   initialSettings?: {
     cliProxyUrl?: string
     syncInterval?: number
-    openCodeConfigPath?: string
   } | null
   authRequired?: boolean
   authenticated?: boolean
@@ -44,7 +43,6 @@ export default function SetupPage({
   const [cliProxyUrl, setCliProxyUrl] = useState(initialSettings?.cliProxyUrl || 'http://localhost:8317')
   const [cliProxyKey, setCliProxyKey] = useState('')
   const [syncInterval, setSyncInterval] = useState(initialSettings?.syncInterval || 5)
-  const [openCodeConfigPath, setOpenCodeConfigPath] = useState(initialSettings?.openCodeConfigPath || '')
   const [settingsError, setSettingsError] = useState('')
   const [settingsLoading, setSettingsLoading] = useState(false)
   const { t } = useI18n()
@@ -57,9 +55,6 @@ export default function SetupPage({
     if (!initialSettings) return
     if (initialSettings.cliProxyUrl) setCliProxyUrl(initialSettings.cliProxyUrl)
     if (initialSettings.syncInterval) setSyncInterval(initialSettings.syncInterval)
-    if (initialSettings.openCodeConfigPath !== undefined) {
-      setOpenCodeConfigPath(initialSettings.openCodeConfigPath)
-    }
   }, [initialSettings])
 
   const setupMeta = useMemo(() => (
@@ -119,7 +114,6 @@ export default function SetupPage({
           cliProxyUrl,
           cliProxyKey,
           syncInterval,
-          openCodeConfigPath,
         }),
       })
 
@@ -257,18 +251,6 @@ export default function SetupPage({
                   ))}
                 </div>
               </div>
-
-              <div>
-                <label className="field-label">{t('OpenCode config directory (optional)')}</label>
-                <input
-                  type="text"
-                  value={openCodeConfigPath}
-                  onChange={(event) => setOpenCodeConfigPath(event.target.value)}
-                  className="field-input"
-                  placeholder={t('Example: C:\\Users\\you\\.config\\opencode')}
-                />
-              </div>
-
               {settingsError ? <p className="text-sm text-[var(--danger)]">{settingsError}</p> : null}
 
               <ActionButton type="submit" variant="primary" size="lg" loading={settingsLoading} icon={<InlineIcon name="spark" />}>
@@ -279,7 +261,7 @@ export default function SetupPage({
         </GlassPanel>
       </div>
 
-      <div className="mx-auto mt-6 grid w-full max-w-[1040px] gap-4 md:grid-cols-3">
+      <div className="mx-auto mt-6 grid w-full max-w-[1040px] gap-4 md:grid-cols-2">
         <InfoChip
           icon={<InlineIcon name="refresh" className="h-4 w-4" />}
           label={t('Sync')}
@@ -289,11 +271,6 @@ export default function SetupPage({
           icon={<InlineIcon name="codex" className="h-4 w-4" />}
           label={t('CodeX')}
           value={t('Account health, quota inspection, and clean-up actions stay available once the proxy is connected.')}
-        />
-        <InfoChip
-          icon={<InlineIcon name="opencode" className="h-4 w-4" />}
-          label={t('OpenCode')}
-          value={t('Provider, model, agent, and category management appear automatically when an OpenCode config directory is configured.')}
         />
       </div>
     </AppShell>

@@ -9,7 +9,6 @@ import { ThemeProvider } from './theme/ThemeProvider'
 const DashboardPage = lazy(() => import('./App'))
 const SetupPage = lazy(() => import('./pages/SetupPage'))
 const CodexPage = lazy(() => import('./pages/CodexPage'))
-const OpenCodePage = lazy(() => import('./pages/OpenCodePage'))
 
 type AuthState = {
   checked: boolean
@@ -22,7 +21,6 @@ type AuthState = {
 type SettingsState = {
   cliProxyUrl: string
   syncInterval: number
-  openCodeConfigPath: string
 }
 
 function LoadingScreen() {
@@ -108,7 +106,6 @@ function RootContent() {
         setCurrentSettings({
           cliProxyUrl: data.cliProxyUrl,
           syncInterval: data.syncInterval,
-          openCodeConfigPath: data.openCodeConfigPath || '',
         })
       } else {
         setCurrentSettings(null)
@@ -181,11 +178,8 @@ function RootContent() {
       <div className="min-h-screen">
         <Suspense fallback={<LoadingScreen />}>
           <Routes>
-            <Route path="/" element={<DashboardPage openCodeEnabled={!!currentSettings?.openCodeConfigPath} />} />
-            <Route path="/codex" element={<CodexPage openCodeEnabled={!!currentSettings?.openCodeConfigPath} />} />
-            {currentSettings?.openCodeConfigPath && (
-              <Route path="/opencode" element={<OpenCodePage openCodeEnabled />} />
-            )}
+            <Route path="/" element={<DashboardPage />} />
+            <Route path="/codex" element={<CodexPage />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </Suspense>

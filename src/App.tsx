@@ -799,7 +799,7 @@ function OverviewCard({ title, value, meta = null, valueClassName = 'text-[#0d0d
   )
 }
 
-function App({ openCodeEnabled }) {
+function App() {
   const pricingSeededRef = useRef(INITIAL_LOCAL_MODEL_PRICING_STATE.hasStoredPricing)
   const { t } = useI18n()
   const { resolvedTheme } = useTheme()
@@ -827,7 +827,7 @@ function App({ openCodeEnabled }) {
   const [syncing, setSyncing] = useState(false)
   const [syncMessage, setSyncMessage] = useState('')
   const [syncError, setSyncError] = useState('')
-  const navItems = useMemo(() => buildPrimaryNav(t, openCodeEnabled), [openCodeEnabled, t])
+  const navItems = useMemo(() => buildPrimaryNav(t), [t])
   const chartTheme = useMemo(() => (
     resolvedTheme === 'dark'
       ? {

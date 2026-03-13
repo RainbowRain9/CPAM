@@ -1,7 +1,6 @@
 type IconName =
   | 'overview'
   | 'codex'
-  | 'opencode'
   | 'theme'
   | 'back'
   | 'plus'
@@ -18,7 +17,6 @@ type IconName =
 const paths: Record<IconName, string[]> = {
   overview: ['M5 12h14M5 6h14M5 18h8'],
   codex: ['M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z'],
-  opencode: ['M4 6h16M4 12h16M4 18h7'],
   theme: ['M12 3v1m0 16v1m8-9h1M3 12H2m15.364 6.364.707.707M5.929 5.929l-.707-.707m12.142 0-.707.707M5.929 18.071l-.707.707', 'M15 12a3 3 0 11-6 0 3 3 0 016 0z'],
   back: ['M10 19l-7-7m0 0 7-7m-7 7h18'],
   plus: ['M12 4v16m8-8H4'],

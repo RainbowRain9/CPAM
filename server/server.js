@@ -352,6 +352,7 @@ app.post('/api/auth/login', (req, res) => {
         const currentBaseUrl = normalizeCliProxyBaseUrl(currentSettings.cliProxyUrl || '');
         if (currentBaseUrl === validation.normalizedBaseUrl && currentSettings.cliProxyKey !== password) {
           currentSettings.cliProxyKey = password;
+          delete currentSettings.openCodeConfigPath;
           saveSettings(currentSettings);
           updateCliProxyVars();
         }
@@ -422,7 +423,6 @@ app.get('/api/settings', (req, res) => {
     configured: true,
     cliProxyUrl: settings.cliProxyUrl,
     cliProxyConfigPath: settings.cliProxyConfigPath,
-    openCodeConfigPath: settings.openCodeConfigPath || '',
     syncInterval: settings.syncInterval || 5
   });
 });
@@ -442,9 +442,7 @@ app.post('/api/settings', async (req, res) => {
   settings.cliProxyUrl = validation.normalizedBaseUrl;
   settings.cliProxyKey = String(cliProxyKey).trim();
   settings.cliProxyConfigPath = cliProxyConfigPath || '';
-  if (req.body.openCodeConfigPath !== undefined) {
-    settings.openCodeConfigPath = req.body.openCodeConfigPath;
-  }
+  delete settings.openCodeConfigPath;
   if (syncInterval !== undefined) {
     settings.syncInterval = syncInterval;
   }
@@ -1257,74 +1255,6 @@ app.post('/api/codex/delete', async (req, res) => {
   } catch (e) {
     console.error('删除CodeX账号失败:', e);
     res.status(500).json({ error: e.message });
-  }
-});
-
-// OpenCode 配置管理 API
-app.get('/api/opencode/config', (req, res) => {
-  const settings = loadSettings();
-  const configPath = settings?.openCodeConfigPath;
-  if (!configPath) {
-    return res.status(400).json({ error: '未配置 OpenCode 路径' });
-  }
-  const filePath = path.join(configPath, 'opencode.json');
-  try {
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: '配置文件不存在: ' + filePath });
-    }
-    const content = fs.readFileSync(filePath, 'utf-8');
-    res.json(JSON.parse(content));
-  } catch (e) {
-    res.status(500).json({ error: '读取配置失败: ' + e.message });
-  }
-});
-
-app.put('/api/opencode/config', (req, res) => {
-  const settings = loadSettings();
-  const configPath = settings?.openCodeConfigPath;
-  if (!configPath) {
-    return res.status(400).json({ error: '未配置 OpenCode 路径' });
-  }
-  const filePath = path.join(configPath, 'opencode.json');
-  try {
-    fs.writeFileSync(filePath, JSON.stringify(req.body, null, 2), 'utf-8');
-    res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ error: '保存配置失败: ' + e.message });
-  }
-});
-
-// Oh My OpenCode 配置管理 API
-app.get('/api/opencode/oh-my', (req, res) => {
-  const settings = loadSettings();
-  const configPath = settings?.openCodeConfigPath;
-  if (!configPath) {
-    return res.status(400).json({ error: '未配置 OpenCode 路径' });
-  }
-  const filePath = path.join(configPath, 'oh-my-opencode.json');
-  try {
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ error: '配置文件不存在: ' + filePath });
-    }
-    const content = fs.readFileSync(filePath, 'utf-8');
-    res.json(JSON.parse(content));
-  } catch (e) {
-    res.status(500).json({ error: '读取配置失败: ' + e.message });
-  }
-});
-
-app.put('/api/opencode/oh-my', (req, res) => {
-  const settings = loadSettings();
-  const configPath = settings?.openCodeConfigPath;
-  if (!configPath) {
-    return res.status(400).json({ error: '未配置 OpenCode 路径' });
-  }
-  const filePath = path.join(configPath, 'oh-my-opencode.json');
-  try {
-    fs.writeFileSync(filePath, JSON.stringify(req.body, null, 2), 'utf-8');
-    res.json({ success: true });
-  } catch (e) {
-    res.status(500).json({ error: '保存配置失败: ' + e.message });
   }
 });
 

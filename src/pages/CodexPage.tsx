@@ -25,6 +25,10 @@ type Account = {
   weeklyWindow?: QuotaWindow | null
 }
 
+function hasAccountIdentifier(value: unknown): value is string | number {
+  return value !== undefined && value !== null && String(value).trim() !== ''
+}
+
 function formatQuotaResetAt(resetAt: number | undefined, locale: string, t: (key: string) => string) {
   if (!resetAt) return t('Returned no time')
 
@@ -224,7 +228,9 @@ export default function CodexPage({ openCodeEnabled = false }: { openCodeEnabled
 
     setDeleting(true)
     try {
-      const authIndexes = toClean.map((account) => account.authIndex)
+      const authIndexes = toClean
+        .map((account) => account.authIndex)
+        .filter(hasAccountIdentifier)
       const res = await apiFetch('/api/codex/delete-by-auth', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -282,7 +288,10 @@ export default function CodexPage({ openCodeEnabled = false }: { openCodeEnabled
       endIdx = Math.min(startIdx + pageCount * ITEMS_PER_PAGE, accounts.length)
     }
 
-    const authIndexes = accounts.slice(startIdx, endIdx).map((account) => account.authIndex).filter(Boolean)
+    const authIndexes = accounts
+      .slice(startIdx, endIdx)
+      .map((account) => account.authIndex)
+      .filter(hasAccountIdentifier)
 
     try {
       const res = await apiFetch('/api/codex/quota', {

@@ -5,11 +5,18 @@ const fs = require('fs');
 const path = require('path');
 const { createProxyMiddleware } = require('http-proxy-middleware');
 const usageDb = require('./db');
+const {
+  hasDefinedIdentifier,
+  resolveAppAuthSecret,
+  shouldUseViteProxy,
+} = require('./runtime');
 
 const app = express();
 const PORT = Number(process.env.PORT || 7940);
 const VITE_DEV_SERVER_URL = process.env.VITE_DEV_SERVER_URL || 'http://localhost:5173';
-const DEV_MODE = process.env.NODE_ENV !== 'production' && !fs.existsSync(path.join(__dirname, '..', 'dist', 'index.html'));
+const DATA_DIR = path.join(__dirname, '..', 'data');
+const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
+const DEV_MODE = shouldUseViteProxy();
 
 // usage 实时更新推送（SSE）
 const usageStreamClients = new Set();
@@ -25,14 +32,10 @@ function broadcastUsageUpdate(payload = {}) {
   }
 }
 
-const DATA_DIR = path.join(__dirname, '..', 'data');
-const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json');
 const AUTH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const LOGIN_RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_MAX_ATTEMPTS = 8;
-const APP_AUTH_SECRET =
-  process.env.API_CENTER_SESSION_SECRET ||
-  crypto.createHash('sha256').update('api-center:session-secret').digest('hex');
+const APP_AUTH_SECRET = resolveAppAuthSecret({ dataDir: DATA_DIR });
 const loginAttempts = new Map();
 
 // 加载/保存设置
@@ -513,8 +516,9 @@ async function fetchAuthIndexMap() {
     const map = {};
     
     files.forEach(file => {
-      if (file.auth_index) {
-        map[file.auth_index] = {
+      if (hasDefinedIdentifier(file.auth_index)) {
+        const authIndexKey = String(file.auth_index);
+        map[authIndexKey] = {
           email: file.email || file.account,
           type: file.type || file.provider,
           name: file.name || file.id,
@@ -547,8 +551,9 @@ async function updateKeyProviderCacheFromUsage(usage) {
             const source = detail.source;
             const authIndex = detail.auth_index;
             if (!source) return;
-            
-            const cacheKey = authIndex || source;
+
+            const authIndexKey = hasDefinedIdentifier(authIndex) ? String(authIndex) : '';
+            const cacheKey = authIndexKey || source;
             
             // 如果缓存中已有完整信息，跳过
             if (cache[cacheKey] && cache[cacheKey].provider && cache[cacheKey].channel) {
@@ -556,8 +561,8 @@ async function updateKeyProviderCacheFromUsage(usage) {
             }
             
             // 优先从 auth-files API 获取精确的渠道信息
-            if (authIndex && authIndexMap[authIndex]) {
-              const authInfo = authIndexMap[authIndex];
+            if (authIndexKey && authIndexMap[authIndexKey]) {
+              const authInfo = authIndexMap[authIndexKey];
               usageDb.upsertKeyProvider(cacheKey, {
                 provider: authInfo.type ? authInfo.type.toUpperCase() : 'UNKNOWN',
                 channel: authInfo.type || 'unknown',
@@ -631,7 +636,10 @@ function extractUsageRecords(usage) {
             
             // 生成唯一ID：使用 api_path + model + auth_index/source + 时间戳 + tokens
             const timestamp = detail.timestamp || '';
-            const requestId = `${apiPath}:${model}:${detail.auth_index || detail.source || 'unknown'}:${timestamp}:${inputTokens}:${outputTokens}`;
+            const recordIdentifier = hasDefinedIdentifier(detail.auth_index)
+              ? String(detail.auth_index)
+              : detail.source || 'unknown';
+            const requestId = `${apiPath}:${model}:${recordIdentifier}:${timestamp}:${inputTokens}:${outputTokens}`;
             
             records.push({
               request_id: requestId,
@@ -868,7 +876,9 @@ app.post('/api/codex/check', async (req, res) => {
         batch.map(async (account) => {
           const authIndex = account.auth_index;
           const chatgptAccountId = account.id_token?.chatgpt_account_id;
-          if (!authIndex) return { account, result: { valid: false, error: 'no auth_index' } };
+          if (!hasDefinedIdentifier(authIndex)) {
+            return { account, result: { valid: false, error: 'no auth_index' } };
+          }
           
           const result = await probeCodexAccount(authIndex, chatgptAccountId);
           return { account, result };
@@ -1120,8 +1130,8 @@ app.post('/api/codex/quota', async (req, res) => {
     
     // 如果指定了 authIndexes，只检查这些账号
     if (authIndexes && Array.isArray(authIndexes) && authIndexes.length > 0) {
-      const indexSet = new Set(authIndexes);
-      codexAccounts = codexAccounts.filter(a => indexSet.has(a.auth_index));
+      const indexSet = new Set(authIndexes.map((value) => String(value)));
+      codexAccounts = codexAccounts.filter(a => indexSet.has(String(a.auth_index)));
     }
     
     const quotas = [];
@@ -1134,7 +1144,7 @@ app.post('/api/codex/quota', async (req, res) => {
         batch.map(async (account) => {
           const authIndex = account.auth_index;
           const chatgptAccountId = account.id_token?.chatgpt_account_id;
-          if (!authIndex) return null;
+          if (!hasDefinedIdentifier(authIndex)) return null;
           
           const result = await probeCodexQuota(authIndex, chatgptAccountId);
           if (result.completionQuota !== undefined || result.fiveHourWindow || result.weeklyWindow) {
@@ -1180,9 +1190,9 @@ app.post('/api/codex/delete-by-auth', async (req, res) => {
     const data = await getRes.json();
     const files = data.files || data || [];
     
-    const indexSet = new Set(authIndexes);
+    const indexSet = new Set(authIndexes.map((value) => String(value)));
     const toDelete = (Array.isArray(files) ? files : [])
-      .filter(f => indexSet.has(f.auth_index))
+      .filter(f => indexSet.has(String(f.auth_index)))
       .map(f => f.name || f.id);
     
     let deleted = 0;

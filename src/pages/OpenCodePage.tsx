@@ -3,6 +3,13 @@ import { apiFetch } from '../auth.js'
 import { ActionButton, AppShell, GlassPanel, InlineIcon } from '../components/ui'
 import { useI18n } from '../i18n/useI18n'
 import { buildPrimaryNav } from '../navigation'
+import {
+  applyProviderOptionDraft,
+  buildProviderOptionDrafts,
+  createProviderOptionDraft,
+  getModelNameValidationError,
+  hasProviderOptionDraftChanges,
+} from './openCodeConfigUtils'
 
 const MODALITY_OPTIONS = ['text', 'image', 'pdf', 'audio', 'video']
 
@@ -41,6 +48,7 @@ function OpenCodePage({ openCodeEnabled = true }) {
   const [showAddModel, setShowAddModel] = useState(null) // providerKey
   const [newProviderForm, setNewProviderForm] = useState({ key: '', npm: '@ai-sdk/openai-compatible', baseURL: '', apiKey: '' })
   const [newModelForm, setNewModelForm] = useState({ name: '', context: 200000, output: 16000, inputMods: ['text'], outputMods: ['text'], attachment: true })
+  const [providerOptionDrafts, setProviderOptionDrafts] = useState({})
   // Oh My OpenCode
   const [ohMyConfig, setOhMyConfig] = useState(null)
   const [ohMyExpanded, setOhMyExpanded] = useState(false)
@@ -57,6 +65,10 @@ function OpenCodePage({ openCodeEnabled = true }) {
     fetchConfig()
     fetchOhMy()
   }, [])
+
+  useEffect(() => {
+    setProviderOptionDrafts(buildProviderOptionDrafts(config))
+  }, [config])
 
   const fetchConfig = async () => {
     try {
@@ -104,7 +116,10 @@ function OpenCodePage({ openCodeEnabled = true }) {
   }
 
   const handleAddProvider = async () => {
-    const { key, npm, baseURL, apiKey } = newProviderForm
+    const key = newProviderForm.key.trim()
+    const npm = newProviderForm.npm.trim()
+    const baseURL = newProviderForm.baseURL.trim()
+    const apiKey = newProviderForm.apiKey.trim()
     if (!key) return setError('提供商名称不能为空')
     if (config.provider?.[key]) return setError('提供商已存在')
 
@@ -130,7 +145,8 @@ function OpenCodePage({ openCodeEnabled = true }) {
   }
 
   const handleAddModel = async (providerKey) => {
-    const { name, context, output, inputMods, outputMods, attachment } = newModelForm
+    const { context, output, inputMods, outputMods, attachment } = newModelForm
+    const name = newModelForm.name.trim()
     if (!name) return setError('模型名称不能为空')
     if (config.provider[providerKey].models[name]) return setError('模型已存在')
 
@@ -156,12 +172,26 @@ function OpenCodePage({ openCodeEnabled = true }) {
   }
 
   const handleUpdateModel = async (providerKey, oldModelKey, modelData) => {
+    const validationError = getModelNameValidationError(
+      config?.provider?.[providerKey]?.models,
+      oldModelKey,
+      modelData.name,
+    )
+    if (validationError) {
+      setError(validationError)
+      return
+    }
+
+    const normalizedModelName = modelData.name.trim()
     const newConfig = JSON.parse(JSON.stringify(config))
     // 如果名称改了，删旧的加新的
-    if (oldModelKey !== modelData.name) {
+    if (oldModelKey !== normalizedModelName) {
       delete newConfig.provider[providerKey].models[oldModelKey]
     }
-    newConfig.provider[providerKey].models[modelData.name] = modelData
+    newConfig.provider[providerKey].models[normalizedModelName] = {
+      ...modelData,
+      name: normalizedModelName,
+    }
     if (await saveConfig(newConfig)) {
       setEditingModel(null)
     }
@@ -174,10 +204,26 @@ function OpenCodePage({ openCodeEnabled = true }) {
     await saveConfig(newConfig)
   }
 
-  const handleUpdateProviderOptions = async (providerKey, field, value) => {
-    const newConfig = JSON.parse(JSON.stringify(config))
-    if (!newConfig.provider[providerKey].options) newConfig.provider[providerKey].options = {}
-    newConfig.provider[providerKey].options[field] = value
+  const updateProviderOptionDraft = (providerKey, field, value) => {
+    setProviderOptionDrafts((prev) => ({
+      ...prev,
+      [providerKey]: {
+        ...(prev[providerKey] || createProviderOptionDraft(config?.provider?.[providerKey]?.options)),
+        [field]: value,
+      },
+    }))
+  }
+
+  const handleResetProviderOptions = (providerKey) => {
+    setProviderOptionDrafts((prev) => ({
+      ...prev,
+      [providerKey]: createProviderOptionDraft(config?.provider?.[providerKey]?.options),
+    }))
+  }
+
+  const handleSaveProviderOptions = async (providerKey) => {
+    const draft = providerOptionDrafts[providerKey] || createProviderOptionDraft(config?.provider?.[providerKey]?.options)
+    const newConfig = applyProviderOptionDraft(config, providerKey, draft)
     await saveConfig(newConfig)
   }
 
@@ -464,6 +510,8 @@ function OpenCodePage({ openCodeEnabled = true }) {
             {providers.map(([provKey, provData]) => {
               const models = provData.models ? Object.entries(provData.models) : []
               const isExpanded = expandedProvider === provKey
+              const providerOptionDraft = providerOptionDrafts[provKey] || createProviderOptionDraft(provData.options)
+              const hasPendingProviderChanges = hasProviderOptionDraftChanges(config, provKey, providerOptionDraft)
 
               return (
                 <div key={provKey} className="border border-[#e5e5e5] rounded-xl overflow-hidden">
@@ -505,8 +553,8 @@ function OpenCodePage({ openCodeEnabled = true }) {
                             <label className="block text-xs text-[#6e6e80] mb-1">Base URL</label>
                             <input
                               type="text"
-                              value={provData.options?.baseURL || ''}
-                              onChange={e => handleUpdateProviderOptions(provKey, 'baseURL', e.target.value)}
+                              value={providerOptionDraft.baseURL}
+                              onChange={e => updateProviderOptionDraft(provKey, 'baseURL', e.target.value)}
                               className="w-full px-3 py-2 text-sm border border-[#e5e5e5] rounded-lg focus:outline-none focus:border-[#0d0d0d]"
                               placeholder="http://localhost:8317/v1"
                             />
@@ -515,12 +563,30 @@ function OpenCodePage({ openCodeEnabled = true }) {
                             <label className="block text-xs text-[#6e6e80] mb-1">API Key</label>
                             <input
                               type="password"
-                              value={provData.options?.apiKey || ''}
-                              onChange={e => handleUpdateProviderOptions(provKey, 'apiKey', e.target.value)}
+                              value={providerOptionDraft.apiKey}
+                              onChange={e => updateProviderOptionDraft(provKey, 'apiKey', e.target.value)}
                               className="w-full px-3 py-2 text-sm border border-[#e5e5e5] rounded-lg focus:outline-none focus:border-[#0d0d0d]"
                               placeholder="sk-..."
                             />
                           </div>
+                        </div>
+                        <div className="mt-3 flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => handleResetProviderOptions(provKey)}
+                            disabled={!hasPendingProviderChanges || saving}
+                            className="px-3 py-1.5 text-sm text-[#6e6e80] border border-[#e5e5e5] rounded-lg hover:bg-[#f7f7f8] disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            重置
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSaveProviderOptions(provKey)}
+                            disabled={!hasPendingProviderChanges || saving}
+                            className="px-3 py-1.5 text-sm font-medium text-white bg-[#0d0d0d] rounded-lg hover:bg-[#2d2d2d] disabled:opacity-40 disabled:cursor-not-allowed"
+                          >
+                            保存提供商配置
+                          </button>
                         </div>
                       </div>
 

@@ -1,28 +1,42 @@
 # API Center
 
-一站式 cpa痛点 管理工具 — 使用量统计、CodeX 账号管理、OpenCode 配置管理。
+一个面向 CLI-Proxy / CPA 场景的本地管理面板，提供使用量持久化统计、CodeX 账号管理和模型定价估算。
 
-## 为什么有这个项目？
+## 当前能力
 
-[CLI-Proxy-API](https://github.com/router-for-me/CLIProxyAPI) 是一个优秀的多模型代理工具，但它不支持使用记录的持久化保存 — 每次重启后历史数据就会丢失。社区曾多次提交 PR 希望加入该功能，均被维护者拒绝（[PR #878](https://github.com/router-for-me/CLIProxyAPI/pull/878)）。
+- 使用量统计
+  - 定时从 CLI-Proxy 导出 usage 数据
+  - 持久化到本地 SQLite，重启后历史不丢
+  - 按 API、模型、时间维度查看请求量和 Token 消耗
+  - 支持 cached tokens / reasoning tokens 展示
+- CodeX 账号管理
+  - 查看 CodeX 账号列表
+  - 批量检查账号有效性
+  - 检查 5 小时和周维度配额
+  - 批量删除失效账号或低配额账号
+- 模型定价
+  - 为模型设置输入/输出价格
+  - 在前端估算成本
 
-的确，统计数据对 CPA 运行没有任何帮助，但是看着就是很舒服。
+## 当前限制
 
-API Center 通过定时从 CLI-Proxy 的 export API 同步数据并存入本地 SQLite 数据库，实现了使用记录的持久化，同时提供了更丰富的可视化统计和管理功能。
+- 当前版本只支持管理 **一套** CLI-Proxy / CPA 配置
+- 目前还 **不支持** 同时保存和切换多套 CPA 地址与密钥
+- OpenCode 相关功能已移除
 
-## 功能
+## 为什么有这个项目
 
-- **使用量统计** — 自动从 CLI-Proxy 同步使用数据，按模型/API/时间维度统计，支持缓存 Tokens 和思考 Tokens 统计
-- **CodeX 账号管理** — 批量检查账号有效性、查询配额、清理失效账号
-- **模型定价** — 自定义模型价格，计算使用成本
-- **OpenCode 配置管理** — 可视化管理 `opencode.json` 中的提供商和模型配置（上下文限制、输出限制、输入/输出能力、附件、Variants）
-- **Oh My OpenCode 管理** — 可视化管理 `oh-my-opencode.json` 中的 Agents 和 Categories 模型分配
+[CLI-Proxy-API](https://github.com/router-for-me/CLIProxyAPI) 本身更关注代理转发，不负责长期保存使用记录。  
+API Center 通过定时调用 CLI-Proxy 的 usage export 接口，把数据写入本地 SQLite，再提供一个更适合日常查看和清理的 Web 面板。
 
 ## 技术栈
 
-- **后端**: Node.js + Express + better-sqlite3
-- **前端**: React + Vite + TailwindCSS + Recharts
-- **数据存储**: SQLite（使用量数据）+ JSON 文件（设置）
+- 后端：Node.js + Express + better-sqlite3
+- 前端：React + Vite + TailwindCSS + Recharts
+- 数据存储：
+  - `data/usage.db`：使用量数据库
+  - `data/settings.json`：运行配置
+  - `data/.session-secret`：本地会话签名密钥
 
 ## 快速开始
 
@@ -32,9 +46,9 @@ API Center 通过定时从 CLI-Proxy 的 export API 同步数据并存入本地 
 npm install
 ```
 
-### 本地部署（推荐）
+### 本地运行
 
-如果你的 CLI-Proxy 就跑在当前机器上，优先使用本地部署，最省事：
+如果 CLI-Proxy 就跑在当前机器上，优先用本地运行：
 
 ```bash
 npm run build
@@ -47,35 +61,10 @@ npm start
 http://localhost:7940
 ```
 
-页面里将 CLI-Proxy 地址填写为：
+首次进入页面时，填写 CLI-Proxy 管理地址，例如：
 
 ```text
 http://localhost:8317
-```
-
-### 本地部署 + systemd 开机自启（推荐生产用法）
-
-仓库已内置：
-
-- 启动脚本：`scripts/start-local.sh`
-- systemd service：`deploy/systemd/api-center.service`
-- 安装脚本：`scripts/install-systemd.sh`
-
-安装方式：
-
-```bash
-cd ~/Code/cli-proxy-API-Center
-chmod +x scripts/*.sh
-sudo ./scripts/install-systemd.sh
-```
-
-常用命令：
-
-```bash
-systemctl status api-center
-systemctl restart api-center
-systemctl stop api-center
-journalctl -u api-center -f
 ```
 
 ### 开发模式
@@ -84,30 +73,40 @@ journalctl -u api-center -f
 npm run dev
 ```
 
-前端 Vite 开发服务器运行在 `http://localhost:5173`，后端 API 运行在 `http://localhost:7940`。
+- 前端：`http://localhost:5173`
+- 后端：`http://localhost:7940`
 
-### 生产模式
+### 测试
 
 ```bash
-npm run build
-npm start
+npm test
 ```
 
-访问 `http://localhost:7940`。
+## 首次使用流程
 
-## 首次使用
+启动后页面会先要求登录验证。
 
-启动后在页面中配置：
+需要填写：
 
-- **CLI-Proxy 地址** — 例如 `http://localhost:8317`
-- **管理密码** — CLI-Proxy 的管理密码
-- **OpenCode 配置目录**（可选）— 例如 `C:\Users\你的用户名\.config\opencode`，配置后主页会显示 OpenCode 管理入口
+- CLI-Proxy URL
+- CLI-Proxy 管理密码
+- 同步间隔
 
-配置完成后即可开始使用各项功能。
+验证通过后，API Center 会：
+
+1. 用你填写的地址和管理密码校验 CLI-Proxy 管理接口是否可用
+2. 在浏览器本地保存一个会话 token
+3. 在服务端保存当前这套 CLI-Proxy 配置
+
+说明：
+
+- 这不是独立账号系统
+- 当前登录本质上是“用 CLI-Proxy 管理密码换取 API Center 的本地会话”
+- 所有 `/api/*` 接口都要求这个本地会话，`/api/auth/*` 除外
 
 ## Docker 部署
 
-> 如果 CLI-Proxy 与本项目部署在同一台机器上，优先推荐上面的“本地部署（推荐）”。Docker 更适合把 API Center 单独封装运行的场景。
+> 如果 CLI-Proxy 与 API Center 在同一台机器上，优先推荐本地运行。Docker 更适合把 API Center 单独封装运行。
 
 ### 直接使用 Docker
 
@@ -128,24 +127,49 @@ docker run -d \
 docker compose up -d --build
 ```
 
-启动后访问：
+访问：
 
 ```text
 http://localhost:7940
 ```
 
-### 持久化说明
+如果 API Center 在容器里、CLI-Proxy 在宿主机上，页面里通常应填写：
 
-项目使用 SQLite + JSON 文件保存数据，容器内统一写入 `/app/data`。
-因此部署时建议挂载：
+```text
+http://host.docker.internal:8317
+```
 
-- 本地 `./data`
-- 容器 `/app/data`
+仓库里的 [docker-compose.yml](/root/Code/cli-proxy-API-Center/docker-compose.yml) 已经配置了 `host.docker.internal` 到宿主机网关的映射。
 
-否则删除容器后，历史统计和设置等数据会丢失。
+## 持久化说明
 
-### 说明
+部署时建议挂载 `./data:/app/data`，否则删除容器后以下数据都会丢失：
 
-- Docker 镜像会先执行 `vite build` 构建前端
-- 生产环境由 `node server/server.js` 提供后端接口和 `dist/` 静态页面
-- 镜像基于 Debian slim，兼容 `better-sqlite3` 原生模块更稳
+- 历史 usage 数据
+- 当前 CLI-Proxy 配置
+- 本地会话签名密钥
+
+## systemd 开机自启
+
+仓库内置：
+
+- 启动脚本：`scripts/start-local.sh`
+- service 文件：`deploy/systemd/api-center.service`
+- 安装脚本：`scripts/install-systemd.sh`
+
+安装方式：
+
+```bash
+cd ~/Code/cli-proxy-API-Center
+chmod +x scripts/*.sh
+sudo ./scripts/install-systemd.sh
+```
+
+常用命令：
+
+```bash
+systemctl status api-center
+systemctl restart api-center
+systemctl stop api-center
+journalctl -u api-center -f
+```

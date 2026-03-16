@@ -28,6 +28,66 @@ function toBooleanFlag(value) {
   return value === 1 || value === true ? 1 : 0;
 }
 
+function hasDefinedIdentifier(value) {
+  return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+function normalizeIdentityText(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function normalizeInstanceFingerprint(record = {}) {
+  const baseUrl = normalizeIdentityText(
+    record.instanceBaseUrl ??
+    record.instance_base_url ??
+    record.baseUrl ??
+    record.base_url
+  );
+  if (baseUrl) {
+    return `base:${baseUrl}`;
+  }
+
+  const name = normalizeIdentityText(
+    record.instanceName ??
+    record.instance_name ??
+    record.name
+  );
+  if (name) {
+    return `name:${name}`;
+  }
+
+  if (hasDefinedIdentifier(record.instanceId ?? record.instance_id)) {
+    return `id:${Number(record.instanceId ?? record.instance_id)}`;
+  }
+
+  return 'global';
+}
+
+function buildUsageRecordDedupeKey(record = {}) {
+  const inputTokens = Number(record.inputTokens ?? record.input_tokens) || 0;
+  const outputTokens = Number(record.outputTokens ?? record.output_tokens) || 0;
+  const cachedTokens = Number(record.cachedTokens ?? record.cached_tokens) || 0;
+  const reasoningTokens = Number(record.reasoningTokens ?? record.reasoning_tokens) || 0;
+  const totalTokens = Number(record.totalTokens ?? record.total_tokens) || (inputTokens + outputTokens);
+  const authIndex = hasDefinedIdentifier(record.authIndex ?? record.auth_index)
+    ? `auth:${String(record.authIndex ?? record.auth_index).trim()}`
+    : `source:${String(record.source || '').trim()}`;
+
+  return JSON.stringify([
+    normalizeInstanceFingerprint(record),
+    String(record.apiPath ?? record.api_path ?? '').trim(),
+    String(record.model || '').trim(),
+    authIndex,
+    String(record.requestTime ?? record.request_time ?? '').trim(),
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    cachedTokens,
+    reasoningTokens,
+    record.success === false || record.success === 0 ? 0 : 1,
+  ]);
+}
+
 function mapInstanceRow(row) {
   if (!row) return null;
 
@@ -53,6 +113,17 @@ function buildScopedCacheKey(instanceId, type, value) {
   return `instance:${instanceId}:${type}:${String(value)}`;
 }
 
+function parseScopedCacheKey(cacheKey) {
+  const match = /^instance:(\d+):(auth|source):(.*)$/.exec(String(cacheKey || ''));
+  if (!match) return null;
+
+  return {
+    instanceId: Number(match[1]),
+    type: match[2],
+    value: match[3],
+  };
+}
+
 function escapeLikeValue(value) {
   return String(value).replace(/([%_\\])/g, '\\$1');
 }
@@ -72,6 +143,7 @@ function createUsageDb(options = {}) {
     CREATE TABLE IF NOT EXISTS usage_records (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       request_id TEXT UNIQUE,
+      dedupe_key TEXT,
       api_path TEXT NOT NULL,
       model TEXT NOT NULL,
       source TEXT,
@@ -167,11 +239,13 @@ function createUsageDb(options = {}) {
   addColumnIfMissing(db, 'usage_records', 'cached_tokens', 'INTEGER DEFAULT 0');
   addColumnIfMissing(db, 'usage_records', 'reasoning_tokens', 'INTEGER DEFAULT 0');
   addColumnIfMissing(db, 'usage_records', 'instance_id', 'INTEGER');
+  addColumnIfMissing(db, 'usage_records', 'dedupe_key', 'TEXT');
   addColumnIfMissing(db, 'model_pricing', 'cache_price', 'REAL');
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_usage_instance ON usage_records(instance_id);
     CREATE INDEX IF NOT EXISTS idx_usage_instance_time ON usage_records(instance_id, request_time);
+    CREATE INDEX IF NOT EXISTS idx_usage_dedupe_key ON usage_records(dedupe_key);
   `);
 
   const stmts = {
@@ -179,6 +253,7 @@ function createUsageDb(options = {}) {
       INSERT OR IGNORE INTO usage_records
       (
         request_id,
+        dedupe_key,
         api_path,
         model,
         source,
@@ -192,8 +267,37 @@ function createUsageDb(options = {}) {
         request_time,
         instance_id
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `),
+    getUsageRecordByDedupeKey: db.prepare(`
+      SELECT id
+      FROM usage_records
+      WHERE dedupe_key = ?
+      LIMIT 1
+    `),
+    listUsageRowsMissingDedupe: db.prepare(`
+      SELECT
+        ur.id,
+        ur.api_path,
+        ur.model,
+        ur.source,
+        ur.auth_index,
+        ur.input_tokens,
+        ur.output_tokens,
+        ur.total_tokens,
+        ur.cached_tokens,
+        ur.reasoning_tokens,
+        ur.success,
+        ur.request_time,
+        ur.instance_id,
+        ci.name as instance_name,
+        ci.base_url as instance_base_url
+      FROM usage_records ur
+      LEFT JOIN cpa_instances ci ON ci.id = ur.instance_id
+      WHERE ur.dedupe_key IS NULL OR ur.dedupe_key = ''
+      ORDER BY ur.id
+    `),
+    updateUsageDedupeKey: db.prepare('UPDATE usage_records SET dedupe_key = ? WHERE id = ?'),
 
     getSyncState: db.prepare('SELECT * FROM sync_state WHERE id = 1'),
     updateSyncState: db.prepare('UPDATE sync_state SET last_sync = ?, last_export_at = ? WHERE id = 1'),
@@ -276,6 +380,13 @@ function createUsageDb(options = {}) {
 
     countCpaInstances: db.prepare('SELECT COUNT(*) as count FROM cpa_instances'),
     getCpaInstanceById: db.prepare('SELECT * FROM cpa_instances WHERE id = ? LIMIT 1'),
+    getCpaInstanceByBaseUrl: db.prepare(`
+      SELECT *
+      FROM cpa_instances
+      WHERE lower(base_url) = lower(?)
+      ORDER BY is_active DESC, is_enabled DESC, updated_at DESC, id DESC
+      LIMIT 1
+    `),
     getActiveCpaInstance: db.prepare(`
       SELECT * FROM cpa_instances
       WHERE is_active = 1
@@ -380,13 +491,35 @@ function createUsageDb(options = {}) {
       SET instance_id = ?
       WHERE instance_id IS NULL
     `),
+    clearUsageDedupeKeyByInstance: db.prepare(`
+      UPDATE usage_records
+      SET dedupe_key = NULL
+      WHERE instance_id = ?
+    `),
   };
+
+  const backfillUsageDedupeKeysTx = db.transaction(() => {
+    const rows = stmts.listUsageRowsMissingDedupe.all();
+
+    for (const row of rows) {
+      stmts.updateUsageDedupeKey.run(buildUsageRecordDedupeKey(row), row.id);
+    }
+  });
 
   const insertUsageBatch = db.transaction((records) => {
     let inserted = 0;
+    let skippedDuplicates = 0;
+
     for (const record of records) {
+      const dedupeKey = record.dedupe_key || buildUsageRecordDedupeKey(record);
+      if (dedupeKey && stmts.getUsageRecordByDedupeKey.get(dedupeKey)) {
+        skippedDuplicates += 1;
+        continue;
+      }
+
       const result = stmts.insertUsage.run(
         record.request_id,
+        dedupeKey,
         record.api_path,
         record.model,
         record.source,
@@ -400,9 +533,17 @@ function createUsageDb(options = {}) {
         record.request_time,
         record.instance_id || null
       );
-      if (result.changes > 0) inserted += 1;
+      if (result.changes > 0) {
+        inserted += 1;
+      } else {
+        skippedDuplicates += 1;
+      }
     }
-    return inserted;
+
+    return {
+      inserted,
+      skippedDuplicates,
+    };
   });
 
   const createCpaInstanceTx = db.transaction((input) => {
@@ -470,6 +611,7 @@ function createUsageDb(options = {}) {
 
     stmts.namespaceLegacyUsageRecords.run(prefix, `${prefix}%`);
     stmts.assignLegacyUsageRecords.run(instanceId);
+    stmts.clearUsageDedupeKeyByInstance.run(instanceId);
 
     const cacheRows = stmts.getKeyProviderCacheRows.all();
     for (const row of cacheRows) {
@@ -506,6 +648,8 @@ function createUsageDb(options = {}) {
         );
       }
     }
+
+    backfillUsageDedupeKeysTx();
   });
 
   const replaceModelPricingTx = db.transaction((pricingMap) => {
@@ -520,6 +664,8 @@ function createUsageDb(options = {}) {
       );
     }
   });
+
+  backfillUsageDedupeKeysTx();
 
   function buildUsageWhereClause(instanceId) {
     if (instanceId === undefined || instanceId === null || instanceId === '') {
@@ -788,8 +934,65 @@ function createUsageDb(options = {}) {
       );
     },
 
+    listKeyProviderCacheEntries(instanceId = null) {
+      return stmts.getKeyProviderCacheRows.all()
+        .map((row) => {
+          const parsedKey = parseScopedCacheKey(row.cache_key);
+          if (!parsedKey) return null;
+          if (instanceId !== null && instanceId !== undefined && parsedKey.instanceId !== Number(instanceId)) {
+            return null;
+          }
+
+          return {
+            cacheKey: row.cache_key,
+            ...parsedKey,
+            provider: row.provider,
+            channel: row.channel,
+            email: row.email,
+            source: row.source,
+          };
+        })
+        .filter(Boolean);
+    },
+
     upsertKeyProvider(cacheKey, data) {
       stmts.upsertKeyProvider.run(cacheKey, data.provider, data.channel, data.email, data.source);
+    },
+
+    listUsageRecords(instanceId = null) {
+      const whereClause = instanceId === null || instanceId === undefined
+        ? ''
+        : 'WHERE ur.instance_id = ?';
+      const rows = db.prepare(`
+        SELECT
+          ur.*,
+          ci.name as instance_name,
+          ci.base_url as instance_base_url
+        FROM usage_records ur
+        LEFT JOIN cpa_instances ci ON ci.id = ur.instance_id
+        ${whereClause}
+        ORDER BY ur.request_time DESC, ur.id DESC
+      `).all(...(whereClause ? [Number(instanceId)] : []));
+
+      return rows.map((row) => ({
+        id: row.id,
+        requestId: row.request_id,
+        dedupeKey: row.dedupe_key || buildUsageRecordDedupeKey(row),
+        apiPath: row.api_path,
+        model: row.model,
+        source: row.source || '',
+        authIndex: row.auth_index,
+        inputTokens: row.input_tokens || 0,
+        outputTokens: row.output_tokens || 0,
+        totalTokens: row.total_tokens || 0,
+        cachedTokens: row.cached_tokens || 0,
+        reasoningTokens: row.reasoning_tokens || 0,
+        success: row.success === 1,
+        requestTime: row.request_time || null,
+        instanceId: row.instance_id,
+        instanceName: row.instance_name || '',
+        instanceBaseUrl: row.instance_base_url || '',
+      }));
     },
 
     getModelPricing() {
@@ -890,6 +1093,14 @@ function createUsageDb(options = {}) {
 
     getCpaInstanceById(id) {
       return mapInstanceRow(stmts.getCpaInstanceById.get(Number(id)));
+    },
+
+    getCpaInstanceByBaseUrl(baseUrl) {
+      if (!String(baseUrl || '').trim()) {
+        return null;
+      }
+
+      return mapInstanceRow(stmts.getCpaInstanceByBaseUrl.get(String(baseUrl).trim()));
     },
 
     getCpaInstances() {

@@ -99,6 +99,49 @@ function serializeCpaInstance(instance) {
   };
 }
 
+function buildPortableInstanceKey(instance) {
+  const normalizedBaseUrl = normalizeCliProxyBaseUrl(instance?.baseUrl || '') || String(instance?.baseUrl || '').trim();
+  if (normalizedBaseUrl) {
+    return `base:${normalizedBaseUrl.toLowerCase()}`;
+  }
+
+  const normalizedName = String(instance?.name || '').trim().toLowerCase();
+  if (normalizedName) {
+    return `name:${normalizedName}`;
+  }
+
+  if (hasDefinedIdentifier(instance?.id)) {
+    return `id:${Number(instance.id)}`;
+  }
+
+  return 'global';
+}
+
+function serializePortableInstance(instance) {
+  if (!instance) return null;
+
+  return {
+    exportKey: buildPortableInstanceKey(instance),
+    name: instance.name || '',
+    baseUrl: instance.baseUrl || '',
+    syncInterval: Number(instance.syncInterval) || DEFAULT_SYNC_INTERVAL_MINUTES,
+    isEnabled: instance.isEnabled === true,
+    status: instance.status || DEFAULT_INSTANCE_STATUS,
+    statusMessage: instance.statusMessage || '',
+    lastCheckedAt: instance.lastCheckedAt || null,
+    lastSyncAt: instance.lastSyncAt || null,
+    lastExportAt: instance.lastExportAt || null,
+  };
+}
+
+function resolveLatestTimestamp(...values) {
+  return values.reduce((latest, value) => {
+    if (!value) return latest;
+    if (!latest) return value;
+    return Date.parse(value) > Date.parse(latest) ? value : latest;
+  }, null);
+}
+
 function createUsageScheduler({ usageDb, syncInstance, logger = console }) {
   const timers = new Map();
 
@@ -347,6 +390,8 @@ function createServerApp(options = {}) {
             success: !detail.failed,
             request_time: timestamp || null,
             instance_id: instance.id,
+            instance_name: instance.name,
+            instance_base_url: instance.baseUrl,
           });
         });
       });
@@ -395,11 +440,17 @@ function createServerApp(options = {}) {
           lastSyncAt: now,
           lastExportAt: exportData.exported_at || instance.lastExportAt,
         });
-        return { instance: usageDb.getCpaInstanceById(instance.id), inserted: 0 };
+        return {
+          instance: usageDb.getCpaInstanceById(instance.id),
+          inserted: 0,
+          skippedDuplicates: 0,
+        };
       }
 
       const records = extractUsageRecords(instance, usage);
-      const inserted = records.length > 0 ? usageDb.insertUsageBatch(records) : 0;
+      const importSummary = records.length > 0
+        ? usageDb.insertUsageBatch(records)
+        : { inserted: 0, skippedDuplicates: 0 };
 
       usageDb.markCpaInstanceSynced(instance.id, {
         status: 'healthy',
@@ -413,12 +464,13 @@ function createServerApp(options = {}) {
       await updateKeyProviderCacheFromUsage(instance, usage);
       broadcastUsageUpdate({
         instanceId: instance.id,
-        inserted,
+        inserted: importSummary.inserted,
       });
 
       return {
         instance: usageDb.getCpaInstanceById(instance.id),
-        inserted,
+        inserted: importSummary.inserted,
+        skippedDuplicates: importSummary.skippedDuplicates,
       };
     } catch (error) {
       if (error?.name === 'AbortError') {
@@ -451,6 +503,208 @@ function createServerApp(options = {}) {
       usage: usageDb.getUsageStats({ instanceId: scopedInstanceId }),
       keyProviderCache: usageDb.getKeyProviderCache(scopedInstanceId),
       modelPricing: usageDb.getModelPricing(),
+    };
+  }
+
+  function buildDataExportPayload(scope, instance = null) {
+    const scopedInstanceId = scope === 'all' ? null : instance?.id || null;
+    const instances = scope === 'all'
+      ? usageDb.getCpaInstances()
+      : instance
+        ? [instance]
+        : [];
+    const portableInstances = instances.map(serializePortableInstance);
+    const portableInstanceById = new Map(instances.map((currentInstance) => [
+      currentInstance.id,
+      serializePortableInstance(currentInstance),
+    ]));
+
+    return {
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      scope,
+      instance: instance ? serializePortableInstance(instance) : null,
+      instances: portableInstances,
+      usageRecords: usageDb.listUsageRecords(scopedInstanceId).map((record) => ({
+        requestId: record.requestId,
+        dedupeKey: record.dedupeKey,
+        apiPath: record.apiPath,
+        model: record.model,
+        source: record.source,
+        authIndex: record.authIndex,
+        inputTokens: record.inputTokens,
+        outputTokens: record.outputTokens,
+        totalTokens: record.totalTokens,
+        cachedTokens: record.cachedTokens,
+        reasoningTokens: record.reasoningTokens,
+        success: record.success,
+        requestTime: record.requestTime,
+        instance: record.instanceId
+          ? portableInstanceById.get(record.instanceId) || serializePortableInstance({
+              id: record.instanceId,
+              name: record.instanceName,
+              baseUrl: record.instanceBaseUrl,
+              syncInterval: DEFAULT_SYNC_INTERVAL_MINUTES,
+              isEnabled: false,
+              status: DISABLED_INSTANCE_STATUS,
+              statusMessage: '',
+              lastCheckedAt: null,
+              lastSyncAt: null,
+              lastExportAt: null,
+            })
+          : null,
+      })),
+      keyProviderCache: usageDb.listKeyProviderCacheEntries(scopedInstanceId).map((entry) => ({
+        type: entry.type,
+        value: entry.value,
+        provider: entry.provider,
+        channel: entry.channel,
+        email: entry.email,
+        source: entry.source,
+        instance: portableInstanceById.get(entry.instanceId) || null,
+      })),
+      modelPricing: usageDb.getModelPricing(),
+    };
+  }
+
+  function normalizeImportedInstanceDefinition(rawInstance, index = 1) {
+    const source = rawInstance && typeof rawInstance === 'object' ? rawInstance : {};
+    const rawBaseUrl = String(source.baseUrl || '').trim();
+    const normalizedBaseUrl = normalizeCliProxyBaseUrl(rawBaseUrl) || rawBaseUrl;
+    const fallbackBaseUrl = normalizedBaseUrl || `imported://instance-${index}`;
+    const name = String(source.name || '').trim() || deriveDefaultInstanceName(fallbackBaseUrl, index);
+    const exportKey = String(source.exportKey || buildPortableInstanceKey({
+      id: source.id,
+      name,
+      baseUrl: fallbackBaseUrl,
+    })).trim();
+
+    return {
+      exportKey,
+      name,
+      baseUrl: fallbackBaseUrl,
+      syncInterval: Number(source.syncInterval) || DEFAULT_SYNC_INTERVAL_MINUTES,
+      isEnabled: source.isEnabled === true,
+      status: String(source.status || DISABLED_INSTANCE_STATUS),
+      statusMessage: String(source.statusMessage || '').trim(),
+      lastCheckedAt: source.lastCheckedAt || null,
+      lastSyncAt: source.lastSyncAt || null,
+      lastExportAt: source.lastExportAt || null,
+    };
+  }
+
+  function normalizeImportedUsageRecord(rawRecord, index = 1) {
+    if (!rawRecord || typeof rawRecord !== 'object') {
+      return null;
+    }
+
+    const apiPath = String(rawRecord.apiPath ?? rawRecord.api_path ?? '').trim();
+    const model = String(rawRecord.model || '').trim();
+    if (!apiPath || !model) {
+      return null;
+    }
+
+    const inputTokens = toNonNegativeNumber(rawRecord.inputTokens ?? rawRecord.input_tokens);
+    const outputTokens = toNonNegativeNumber(rawRecord.outputTokens ?? rawRecord.output_tokens);
+    const cachedTokens = toNonNegativeNumber(rawRecord.cachedTokens ?? rawRecord.cached_tokens);
+    const reasoningTokens = toNonNegativeNumber(rawRecord.reasoningTokens ?? rawRecord.reasoning_tokens);
+    const authIndexValue = rawRecord.authIndex ?? rawRecord.auth_index;
+
+    return {
+      requestId: String(rawRecord.requestId ?? rawRecord.request_id ?? '').trim(),
+      dedupeKey: String(rawRecord.dedupeKey ?? rawRecord.dedupe_key ?? '').trim(),
+      apiPath,
+      model,
+      source: String(rawRecord.source || '').trim(),
+      authIndex: hasDefinedIdentifier(authIndexValue) ? String(authIndexValue).trim() : null,
+      inputTokens,
+      outputTokens,
+      totalTokens: toNonNegativeNumber(rawRecord.totalTokens ?? rawRecord.total_tokens) || (inputTokens + outputTokens),
+      cachedTokens,
+      reasoningTokens,
+      success: rawRecord.failed === true ? false : rawRecord.success !== false,
+      requestTime: String(rawRecord.requestTime ?? rawRecord.request_time ?? rawRecord.timestamp ?? '').trim() || null,
+      instance: rawRecord.instance ? normalizeImportedInstanceDefinition(rawRecord.instance, index) : null,
+    };
+  }
+
+  function normalizeImportedCacheEntry(rawEntry, index = 1) {
+    if (!rawEntry || typeof rawEntry !== 'object') {
+      return null;
+    }
+
+    const type = rawEntry.type === 'auth' ? 'auth' : rawEntry.type === 'source' ? 'source' : '';
+    const value = String(rawEntry.value || '').trim();
+    if (!type || !value) {
+      return null;
+    }
+
+    return {
+      type,
+      value,
+      provider: String(rawEntry.provider || '').trim(),
+      channel: String(rawEntry.channel || '').trim(),
+      email: String(rawEntry.email || '').trim(),
+      source: String(rawEntry.source || '').trim(),
+      instance: rawEntry.instance ? normalizeImportedInstanceDefinition(rawEntry.instance, index) : null,
+    };
+  }
+
+  function normalizeImportedDataBundle(rawPayload) {
+    const payload = rawPayload && typeof rawPayload === 'object' ? rawPayload : null;
+    if (!payload) {
+      throw new Error('导入文件格式无效');
+    }
+
+    const instanceByKey = new Map();
+    const registerInstance = (candidate) => {
+      if (!candidate) return null;
+      const normalized = normalizeImportedInstanceDefinition(candidate, instanceByKey.size + 1);
+      if (!instanceByKey.has(normalized.exportKey)) {
+        instanceByKey.set(normalized.exportKey, normalized);
+      }
+      return instanceByKey.get(normalized.exportKey);
+    };
+
+    if (payload.instance) {
+      registerInstance(payload.instance);
+    }
+
+    (Array.isArray(payload.instances) ? payload.instances : []).forEach(registerInstance);
+
+    const usageRecords = (Array.isArray(payload.usageRecords) ? payload.usageRecords : [])
+      .map((record) => {
+        const normalized = normalizeImportedUsageRecord(record, instanceByKey.size + 1);
+        if (normalized?.instance) {
+          normalized.instance = registerInstance(normalized.instance);
+        }
+        return normalized;
+      })
+      .filter(Boolean);
+
+    const keyProviderCache = (Array.isArray(payload.keyProviderCache) ? payload.keyProviderCache : [])
+      .map((entry) => {
+        const normalized = normalizeImportedCacheEntry(entry, instanceByKey.size + 1);
+        if (normalized?.instance) {
+          normalized.instance = registerInstance(normalized.instance);
+        }
+        return normalized;
+      })
+      .filter(Boolean);
+
+    const modelPricing = normalizeModelPricingMap(payload.modelPricing) || {};
+
+    if (usageRecords.length === 0 && keyProviderCache.length === 0 && Object.keys(modelPricing).length === 0) {
+      throw new Error('导入文件不包含可导入的数据');
+    }
+
+    return {
+      version: Number(payload.version) || 1,
+      exportedAt: payload.exportedAt || null,
+      instances: Array.from(instanceByKey.values()),
+      usageRecords,
+      keyProviderCache,
+      modelPricing,
     };
   }
 
@@ -552,7 +806,7 @@ function createServerApp(options = {}) {
 
   importLegacySettingsIfNeeded();
 
-  app.use(express.json());
+  app.use(express.json({ limit: '50mb' }));
   app.disable('x-powered-by');
   app.use(express.static(distDir));
   app.use('/api/auth', authRouter);
@@ -767,6 +1021,164 @@ function createServerApp(options = {}) {
       exports: [],
       lastExport: payload.lastExport,
     });
+  });
+
+  app.get('/api/data-export', (req, res) => {
+    const resolved = resolveUsageScope(req.query.scope, req.query.instanceId);
+    if (resolved.error) {
+      return res.status(resolved.status || 400).json({ error: resolved.error });
+    }
+
+    res.json(buildDataExportPayload(resolved.scope, resolved.instance));
+  });
+
+  app.post('/api/data-import', (req, res) => {
+    try {
+      const importedBundle = normalizeImportedDataBundle(req.body);
+      const existingInstances = usageDb.getCpaInstances();
+      const instancesByBaseUrl = new Map(
+        existingInstances.map((instance) => [String(instance.baseUrl || '').trim().toLowerCase(), instance])
+      );
+      const instancesByName = new Map(
+        existingInstances.map((instance) => [String(instance.name || '').trim().toLowerCase(), instance])
+      );
+      const instanceIdByExportKey = new Map();
+      let instancesMatched = 0;
+      let instancesCreated = 0;
+
+      const resolveImportedInstance = (definition) => {
+        const existingInstanceId = instanceIdByExportKey.get(definition.exportKey);
+        if (existingInstanceId) {
+          return usageDb.getCpaInstanceById(existingInstanceId);
+        }
+
+        const normalizedBaseUrl = String(definition.baseUrl || '').trim().toLowerCase();
+        const normalizedName = String(definition.name || '').trim().toLowerCase();
+        const matched = (
+          (normalizedBaseUrl ? instancesByBaseUrl.get(normalizedBaseUrl) : null) ||
+          (normalizedName ? instancesByName.get(normalizedName) : null) ||
+          null
+        );
+
+        if (matched) {
+          instancesMatched += 1;
+          const mergedLastCheckedAt = resolveLatestTimestamp(matched.lastCheckedAt, definition.lastCheckedAt);
+          const mergedLastSyncAt = resolveLatestTimestamp(matched.lastSyncAt, definition.lastSyncAt);
+          const mergedLastExportAt = resolveLatestTimestamp(matched.lastExportAt, definition.lastExportAt);
+
+          if (
+            mergedLastCheckedAt !== matched.lastCheckedAt ||
+            mergedLastSyncAt !== matched.lastSyncAt ||
+            mergedLastExportAt !== matched.lastExportAt
+          ) {
+            usageDb.updateCpaInstance(matched.id, {
+              lastCheckedAt: mergedLastCheckedAt,
+              lastSyncAt: mergedLastSyncAt,
+              lastExportAt: mergedLastExportAt,
+            });
+          }
+
+          instanceIdByExportKey.set(definition.exportKey, matched.id);
+          return usageDb.getCpaInstanceById(matched.id) || matched;
+        }
+
+        const created = usageDb.createCpaInstance({
+          name: definition.name,
+          baseUrl: definition.baseUrl,
+          apiKey: '__imported__',
+          syncInterval: definition.syncInterval,
+          isEnabled: false,
+          status: DISABLED_INSTANCE_STATUS,
+          statusMessage: definition.statusMessage || 'Imported data only',
+          lastCheckedAt: definition.lastCheckedAt,
+          lastSyncAt: definition.lastSyncAt,
+          lastExportAt: definition.lastExportAt,
+        });
+
+        instancesCreated += 1;
+        instancesByBaseUrl.set(String(created.baseUrl || '').trim().toLowerCase(), created);
+        instancesByName.set(String(created.name || '').trim().toLowerCase(), created);
+        instanceIdByExportKey.set(definition.exportKey, created.id);
+        return created;
+      };
+
+      importedBundle.instances.forEach(resolveImportedInstance);
+
+      const records = importedBundle.usageRecords.map((record, index) => {
+        const instanceDefinition = record.instance
+          ? importedBundle.instances.find((entry) => entry.exportKey === record.instance.exportKey) || record.instance
+          : null;
+        const resolvedInstance = instanceDefinition ? resolveImportedInstance(instanceDefinition) : null;
+        const requestId = record.requestId || `import:${record.dedupeKey || `${record.apiPath}:${record.model}:${index}`}`;
+
+        return {
+          request_id: requestId,
+          api_path: record.apiPath,
+          model: record.model,
+          source: record.source || null,
+          auth_index: record.authIndex,
+          input_tokens: record.inputTokens,
+          output_tokens: record.outputTokens,
+          total_tokens: record.totalTokens,
+          cached_tokens: record.cachedTokens,
+          reasoning_tokens: record.reasoningTokens,
+          success: record.success,
+          request_time: record.requestTime,
+          instance_id: resolvedInstance?.id || null,
+          instance_name: resolvedInstance?.name || record.instance?.name || '',
+          instance_base_url: resolvedInstance?.baseUrl || record.instance?.baseUrl || '',
+          dedupe_key: record.dedupeKey || '',
+        };
+      });
+
+      const recordImportSummary = records.length > 0
+        ? usageDb.insertUsageBatch(records)
+        : { inserted: 0, skippedDuplicates: 0 };
+
+      importedBundle.keyProviderCache.forEach((entry) => {
+        const instanceDefinition = entry.instance
+          ? importedBundle.instances.find((definition) => definition.exportKey === entry.instance.exportKey) || entry.instance
+          : null;
+        const resolvedInstance = instanceDefinition ? resolveImportedInstance(instanceDefinition) : null;
+        if (!resolvedInstance) {
+          return;
+        }
+
+        usageDb.upsertKeyProvider(
+          buildScopedCacheKey(resolvedInstance.id, entry.type, entry.value),
+          {
+            provider: entry.provider,
+            channel: entry.channel,
+            email: entry.email,
+            source: entry.source,
+          }
+        );
+      });
+
+      const mergedPricing = normalizeModelPricingMap({
+        ...usageDb.getModelPricing(),
+        ...importedBundle.modelPricing,
+      }) || {};
+      usageDb.replaceModelPricing(mergedPricing);
+      usageDb.ensureActiveCpaInstance();
+
+      res.json({
+        success: true,
+        summary: {
+          instancesMatched,
+          instancesCreated,
+          recordsReceived: records.length,
+          recordsInserted: recordImportSummary.inserted,
+          duplicatesSkipped: recordImportSummary.skippedDuplicates,
+          keyProviderEntriesImported: importedBundle.keyProviderCache.length,
+          pricingModelsMerged: Object.keys(importedBundle.modelPricing).length,
+        },
+      });
+    } catch (error) {
+      res.status(400).json({
+        error: error?.message || '导入数据失败',
+      });
+    }
   });
 
   app.post('/api/usage/export-now', async (req, res) => {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { type ChangeEvent, useEffect, useMemo, useRef, useState } from 'react'
 import {
   CartesianGrid,
   Line,
@@ -142,6 +142,16 @@ export function formatLocalDateKey(date) {
   const month = String(date.getMonth() + 1).padStart(2, '0')
   const day = String(date.getDate()).padStart(2, '0')
   return `${year}-${month}-${day}`
+}
+
+function sanitizeFileNamePart(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .toLowerCase()
 }
 
 function maskSensitiveValue(value) {
@@ -840,6 +850,7 @@ function OverviewCard({ title, value, meta = null, valueClassName = 'text-[#0d0d
 
 function App() {
   const pricingMigrationAttemptedRef = useRef(false)
+  const importInputRef = useRef<HTMLInputElement | null>(null)
   const { t } = useI18n()
   const { resolvedTheme } = useTheme()
 
@@ -868,6 +879,10 @@ function App() {
   const [syncing, setSyncing] = useState(false)
   const [syncMessage, setSyncMessage] = useState('')
   const [syncError, setSyncError] = useState('')
+  const [exportingData, setExportingData] = useState(false)
+  const [importingData, setImportingData] = useState(false)
+  const [dataTransferMessage, setDataTransferMessage] = useState('')
+  const [dataTransferError, setDataTransferError] = useState('')
   const [instances, setInstances] = useState<CpaInstance[]>([])
   const [usageScope, setUsageScope] = useState<'instance' | 'all'>('instance')
   const [selectedInstanceId, setSelectedInstanceId] = useState<number | ''>('')
@@ -909,6 +924,28 @@ function App() {
     ? t('Total summary')
     : viewInstanceName || selectedInstance?.name || t('Current instance')
   const manualSyncDisabled = syncing || (usageScope === 'instance' && !selectedInstance?.isEnabled)
+
+  const buildScopeParams = (nextScope: 'instance' | 'all', requestedInstanceId: number | '' = selectedInstanceId) => {
+    const params = new URLSearchParams()
+
+    if (nextScope === 'all') {
+      params.set('scope', 'all')
+      return params
+    }
+
+    params.set('scope', 'instance')
+    const numericInstanceId = Number(requestedInstanceId)
+    if (Number.isFinite(numericInstanceId)) {
+      params.set('instanceId', String(numericInstanceId))
+      return params
+    }
+
+    if (selectedInstance?.id) {
+      params.set('instanceId', String(selectedInstance.id))
+    }
+
+    return params
+  }
 
   const resolveSelectedInstanceId = (nextInstances: CpaInstance[], requestedId: number | '' = selectedInstanceId) => {
     const numericId = Number(requestedId)
@@ -981,16 +1018,7 @@ function App() {
         setSelectedInstanceId(resolvedInstanceId)
       }
 
-      const params = new URLSearchParams()
-      if (nextScope === 'all') {
-        params.set('scope', 'all')
-      } else {
-        params.set('scope', 'instance')
-        if (resolvedInstanceId !== null) {
-          params.set('instanceId', String(resolvedInstanceId))
-        }
-      }
-
+      const params = buildScopeParams(nextScope, resolvedInstanceId ?? '')
       const res = await apiFetch(`/api/usage?${params.toString()}`)
       if (res.ok) {
         const data = await res.json()
@@ -1067,14 +1095,7 @@ function App() {
     setSyncMessage('')
 
     try {
-      const params = new URLSearchParams()
-      if (usageScope === 'all') {
-        params.set('scope', 'all')
-      } else if (selectedInstance) {
-        params.set('scope', 'instance')
-        params.set('instanceId', String(selectedInstance.id))
-      }
-
+      const params = buildScopeParams(usageScope, selectedInstance?.id || selectedInstanceId)
       const res = await apiFetch(`/api/usage/export-now?${params.toString()}`, { method: 'POST' })
       const data = await res.json().catch(() => ({}))
       if (!res.ok) {
@@ -1089,6 +1110,96 @@ function App() {
       setSyncError((e as Error).message || t('Manual sync failed'))
     } finally {
       setSyncing(false)
+    }
+  }
+
+  const handleExportData = async () => {
+    setExportingData(true)
+    setDataTransferError('')
+    setDataTransferMessage('')
+
+    try {
+      const params = buildScopeParams(usageScope, selectedInstance?.id || selectedInstanceId)
+      const res = await apiFetch(`/api/data-export?${params.toString()}`)
+      const payload = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new Error((payload as { error?: string }).error || t('Export failed'))
+      }
+
+      const blob = new Blob([JSON.stringify(payload, null, 2)], {
+        type: 'application/json;charset=utf-8',
+      })
+      const objectUrl = window.URL.createObjectURL(blob)
+      const anchor = document.createElement('a')
+      const viewLabel = usageScope === 'all'
+        ? 'all'
+        : sanitizeFileNamePart(selectedInstance?.name || viewInstanceName || 'instance')
+      const datePart = formatLocalDateKey(new Date())
+
+      anchor.href = objectUrl
+      anchor.download = `cpam-data-${viewLabel || 'instance'}-${datePart}.json`
+      anchor.click()
+      window.URL.revokeObjectURL(objectUrl)
+
+      const recordCount = Array.isArray((payload as { usageRecords?: unknown[] }).usageRecords)
+        ? (payload as { usageRecords: unknown[] }).usageRecords.length
+        : 0
+      setDataTransferMessage(`导出完成，已生成 ${recordCount} 条记录的数据文件`)
+    } catch (error) {
+      setDataTransferError((error as Error).message || t('Export failed'))
+    } finally {
+      setExportingData(false)
+    }
+  }
+
+  const handleImportButtonClick = () => {
+    setDataTransferError('')
+    setDataTransferMessage('')
+    importInputRef.current?.click()
+  }
+
+  const handleImportFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    event.target.value = ''
+
+    if (!file) {
+      return
+    }
+
+    setImportingData(true)
+    setDataTransferError('')
+    setDataTransferMessage('')
+
+    try {
+      const rawText = await file.text()
+      const payload = JSON.parse(rawText)
+      const res = await apiFetch('/api/data-import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        throw new Error(data.error || '导入失败')
+      }
+
+      const summary = data.summary || {}
+      const nextScope: 'instance' | 'all' = usageScope === 'instance' && (selectedInstance || activeInstance)
+        ? usageScope
+        : 'all'
+
+      if (nextScope !== usageScope) {
+        setUsageScope(nextScope)
+      }
+
+      setDataTransferMessage(
+        `导入完成：新增 ${formatNumber(summary.recordsInserted || 0)} 条请求，跳过 ${formatNumber(summary.duplicatesSkipped || 0)} 条重复记录`
+      )
+      await fetchUsage(nextScope, nextScope === 'all' ? '' : (selectedInstance?.id || selectedInstanceId))
+    } catch (error) {
+      setDataTransferError((error as Error).message || '导入失败')
+    } finally {
+      setImportingData(false)
     }
   }
 
@@ -1256,22 +1367,50 @@ function App() {
               ) : null}
 
               <div className="flex flex-wrap gap-2 lg:justify-end">
-              <ActionButton
-                onClick={handleManualSync}
-                disabled={manualSyncDisabled}
-                variant="primary"
-                icon={<InlineIcon name="refresh" className={syncing ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />}
-                loading={syncing}
-              >
-                {syncing ? t('Syncing...') : t('Manual sync')}
-              </ActionButton>
+                <ActionButton
+                  onClick={handleExportData}
+                  disabled={exportingData || importingData}
+                  variant="secondary"
+                  icon={<InlineIcon name="download" className="h-4 w-4" />}
+                  loading={exportingData}
+                >
+                  {exportingData ? '导出中...' : '导出数据'}
+                </ActionButton>
+                <ActionButton
+                  onClick={handleImportButtonClick}
+                  disabled={exportingData || importingData}
+                  variant="secondary"
+                  icon={<InlineIcon name="upload" className="h-4 w-4" />}
+                  loading={importingData}
+                >
+                  {importingData ? '导入中...' : '导入数据'}
+                </ActionButton>
+                <ActionButton
+                  onClick={handleManualSync}
+                  disabled={manualSyncDisabled}
+                  variant="primary"
+                  icon={<InlineIcon name="refresh" className={syncing ? 'h-4 w-4 animate-spin' : 'h-4 w-4'} />}
+                  loading={syncing}
+                >
+                  {syncing ? t('Syncing...') : t('Manual sync')}
+                </ActionButton>
               </div>
             </div>
           </div>
         </div>
 
+        <input
+          ref={importInputRef}
+          type="file"
+          accept="application/json"
+          className="hidden"
+          onChange={handleImportFileChange}
+        />
+
         {syncMessage && <p className="text-sm text-[var(--success)]">{syncMessage}</p>}
         {syncError && <p className="text-sm text-[var(--danger)]">{syncError}</p>}
+        {dataTransferMessage && <p className="text-sm text-[var(--success)]">{dataTransferMessage}</p>}
+        {dataTransferError && <p className="text-sm text-[var(--danger)]">{dataTransferError}</p>}
 
         {loading && (
           <div className="surface-panel flex min-h-[260px] flex-col items-center justify-center rounded-[32px] text-center">

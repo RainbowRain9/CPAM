@@ -672,4 +672,130 @@ describe('server app multi-instance routes', () => {
     const usageAfterClear = await usageAfterClearResponse.json()
     expect(usageAfterClear.modelPricing).toEqual({})
   })
+
+  it('exports data bundles and skips duplicates when importing the same data again', async () => {
+    const sourceFetchImpl = createCliProxyFetchMock()
+    const { baseUrl: sourceBaseUrl } = await startApp(sourceFetchImpl as unknown as typeof fetch)
+    const sourceCookie = await bootstrapCookie(sourceBaseUrl)
+
+    const sourceInstanceResponse = await apiRequest(sourceBaseUrl, sourceCookie, '/api/cpa-instances', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Source A',
+        baseUrl: 'http://instance-a:8317',
+        apiKey: 'good-a',
+        syncInterval: 5,
+        isEnabled: true,
+      }),
+    })
+    expect(sourceInstanceResponse.status).toBe(201)
+
+    const sourcePricingResponse = await apiRequest(sourceBaseUrl, sourceCookie, '/api/pricing', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pricing: {
+          'gpt-a': {
+            promptPrice: 1,
+            completionPrice: 3,
+            cachePrice: 0.25,
+          },
+        },
+      }),
+    })
+    expect(sourcePricingResponse.status).toBe(200)
+
+    const sourceSyncResponse = await apiRequest(sourceBaseUrl, sourceCookie, '/api/usage/export-now', {
+      method: 'POST',
+    })
+    expect(sourceSyncResponse.status).toBe(200)
+
+    const exportResponse = await apiRequest(sourceBaseUrl, sourceCookie, '/api/data-export?scope=all')
+    expect(exportResponse.status).toBe(200)
+
+    const exportPayload = await exportResponse.json()
+    expect(exportPayload.usageRecords).toHaveLength(1)
+    expect(exportPayload.modelPricing['gpt-a']).toMatchObject({
+      promptPrice: 1,
+      completionPrice: 3,
+      cachePrice: 0.25,
+    })
+
+    const targetFetchImpl = createCliProxyFetchMock()
+    const { baseUrl: targetBaseUrl, usageDb: targetUsageDb } = await startApp(targetFetchImpl as unknown as typeof fetch)
+    const targetCookie = await bootstrapCookie(targetBaseUrl)
+
+    const dummyInstance = targetUsageDb.createCpaInstance({
+      name: 'Dummy',
+      baseUrl: 'http://good-b:8317',
+      apiKey: 'good-b',
+      syncInterval: 5,
+      isEnabled: false,
+    })
+    const matchingInstance = targetUsageDb.createCpaInstance({
+      name: 'Target A',
+      baseUrl: 'http://instance-a:8317',
+      apiKey: 'good-a',
+      syncInterval: 5,
+      isEnabled: true,
+    })
+    expect(dummyInstance).toBeTruthy()
+    expect(matchingInstance).toBeTruthy()
+
+    const firstImportResponse = await apiRequest(targetBaseUrl, targetCookie, '/api/data-import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(exportPayload),
+    })
+    expect(firstImportResponse.status).toBe(200)
+
+    const firstImportPayload = await firstImportResponse.json()
+    expect(firstImportPayload.summary).toMatchObject({
+      instancesMatched: 1,
+      instancesCreated: 0,
+      recordsReceived: 1,
+      recordsInserted: 1,
+      duplicatesSkipped: 0,
+      keyProviderEntriesImported: 1,
+      pricingModelsMerged: 1,
+    })
+
+    const pricingAfterImportResponse = await apiRequest(targetBaseUrl, targetCookie, '/api/pricing')
+    const pricingAfterImport = await pricingAfterImportResponse.json()
+    expect(pricingAfterImport['gpt-a']).toMatchObject({
+      promptPrice: 1,
+      completionPrice: 3,
+      cachePrice: 0.25,
+    })
+
+    const aggregateUsageAfterImportResponse = await apiRequest(targetBaseUrl, targetCookie, '/api/usage?scope=all')
+    const aggregateUsageAfterImport = await aggregateUsageAfterImportResponse.json()
+    expect(aggregateUsageAfterImport.usage.total_requests).toBe(1)
+    expect(aggregateUsageAfterImport.keyProviderCache[`instance:${matchingInstance.id}:auth:a-1`]).toMatchObject({
+      email: 'a@example.com',
+    })
+
+    const liveSyncAfterImportResponse = await apiRequest(targetBaseUrl, targetCookie, `/api/usage/export-now?scope=instance&instanceId=${matchingInstance.id}`, {
+      method: 'POST',
+    })
+    expect(liveSyncAfterImportResponse.status).toBe(200)
+
+    const aggregateUsageAfterSyncResponse = await apiRequest(targetBaseUrl, targetCookie, '/api/usage?scope=all')
+    const aggregateUsageAfterSync = await aggregateUsageAfterSyncResponse.json()
+    expect(aggregateUsageAfterSync.usage.total_requests).toBe(1)
+
+    const secondImportResponse = await apiRequest(targetBaseUrl, targetCookie, '/api/data-import', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(exportPayload),
+    })
+    expect(secondImportResponse.status).toBe(200)
+
+    const secondImportPayload = await secondImportResponse.json()
+    expect(secondImportPayload.summary).toMatchObject({
+      recordsInserted: 0,
+      duplicatesSkipped: 1,
+    })
+  })
 })

@@ -384,4 +384,99 @@ describe('App pricing persistence', () => {
       expect(window.localStorage.getItem(LOCAL_MODEL_PRICING_PRESET_OPT_IN_KEY)).toBe('false')
     })
   })
+
+  it('exports the current data view and imports files with duplicate summaries', async () => {
+    const anchorClick = vi.fn()
+    const originalCreateObjectUrl = URL.createObjectURL
+    const originalRevokeObjectUrl = URL.revokeObjectURL
+    const originalAnchorClick = HTMLAnchorElement.prototype.click
+
+    URL.createObjectURL = vi.fn(() => 'blob:cpam-export')
+    URL.revokeObjectURL = vi.fn()
+    HTMLAnchorElement.prototype.click = anchorClick
+
+    const exportPayload = {
+      version: 1,
+      usageRecords: [{
+        requestId: 'instance:1:/v1/chat/completions:gpt-a:a-1:2026-03-14T00:00:00.000Z:10:5',
+      }],
+    }
+
+    apiFetch.mockImplementation((path: string, init?: RequestInit) => {
+      if (path.startsWith('/api/usage?')) {
+        return Promise.resolve(jsonResponse(createUsagePayload()))
+      }
+
+      if (path.startsWith('/api/data-export?')) {
+        return Promise.resolve(jsonResponse(exportPayload))
+      }
+
+      if (path === '/api/data-import' && init?.method === 'POST') {
+        return Promise.resolve(jsonResponse({
+          success: true,
+          summary: {
+            recordsInserted: 1,
+            duplicatesSkipped: 2,
+          },
+        }))
+      }
+
+      throw new Error(`Unexpected path: ${path}`)
+    })
+
+    try {
+      await renderApp()
+
+      fireEvent.click(screen.getByRole('button', { name: '导出数据' }))
+
+      await waitFor(() => {
+        expect(apiFetch).toHaveBeenCalledWith('/api/data-export?scope=instance&instanceId=1')
+        expect(URL.createObjectURL).toHaveBeenCalledTimes(1)
+        expect(anchorClick).toHaveBeenCalledTimes(1)
+      })
+      expect(await screen.findByText('导出完成，已生成 1 条记录的数据文件')).toBeInTheDocument()
+
+      const importInput = document.querySelector('input[type="file"]') as HTMLInputElement
+      expect(importInput).toBeTruthy()
+
+      const importFile = new File(
+        [
+          JSON.stringify({
+            version: 1,
+            usageRecords: [{
+              requestId: 'import-1',
+              apiPath: '/v1/chat/completions',
+              model: 'gpt-a',
+            }],
+          }),
+        ],
+        'cpam-import.json',
+        { type: 'application/json' },
+      )
+
+      fireEvent.change(importInput, {
+        target: {
+          files: [importFile],
+        },
+      })
+
+      await waitFor(() => {
+        expect(apiFetch.mock.calls.some(([path]) => path === '/api/data-import')).toBe(true)
+      })
+
+      const importCall = apiFetch.mock.calls.find(([path]) => path === '/api/data-import')
+      expect(importCall?.[1]).toMatchObject({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      })
+      expect(JSON.parse(String(importCall?.[1]?.body || '{}'))).toMatchObject({
+        version: 1,
+      })
+      expect(await screen.findByText('导入完成：新增 1 条请求，跳过 2 条重复记录')).toBeInTheDocument()
+    } finally {
+      URL.createObjectURL = originalCreateObjectUrl
+      URL.revokeObjectURL = originalRevokeObjectUrl
+      HTMLAnchorElement.prototype.click = originalAnchorClick
+    }
+  })
 })

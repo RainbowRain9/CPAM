@@ -96,9 +96,11 @@ export function ParticleCanvas({
 }: ParticleCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
   const animationRef = useRef<number | null>(null)
+  const lastFrameRef = useRef(0)
   const particlesRef = useRef<Particle[]>([])
   const pointerRef = useRef<PointerState>({ x: 0, y: 0, active: false })
   const visibleRef = useRef(true)
+  const pointerEnabledRef = useRef(interactive)
   const { resolvedTheme } = useTheme()
 
   const config = useMemo(() => themeTokens[resolvedTheme], [resolvedTheme])
@@ -110,45 +112,96 @@ export function ParticleCanvas({
     const ctx = canvas.getContext('2d')
     if (!ctx) return
 
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const isLowPowerDevice = (navigator.hardwareConcurrency ?? 8) <= 4
+    const densityScale = isLowPowerDevice ? 0.58 : 1
+    const minParticles = subdued ? 18 : 24
+    const maxParticles = isLowPowerDevice ? 56 : subdued ? 84 : 120
+    const targetFps = subdued || isLowPowerDevice ? 24 : 30
+    const frameInterval = 1000 / targetFps
+    const dprCap = isLowPowerDevice ? 1 : subdued ? 1.25 : 1.5
+    pointerEnabledRef.current = interactive && !prefersReducedMotion && !isLowPowerDevice
+
     const resize = () => {
       const parent = canvas.parentElement
       const width = Math.max(parent?.clientWidth || 0, window.innerWidth)
       const height = Math.max(parent?.clientHeight || 0, window.innerHeight)
-      const dpr = window.devicePixelRatio || 1
+      const dpr = Math.min(window.devicePixelRatio || 1, dprCap)
       canvas.width = width * dpr
       canvas.height = height * dpr
       canvas.style.width = `${width}px`
       canvas.style.height = `${height}px`
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
 
-      const particleCount = Math.round((width * height) / 15000 * density * config.densityScale * (subdued ? 0.78 : 1))
-      particlesRef.current = Array.from({ length: Math.max(26, Math.min(140, particleCount)) }, () => new Particle(width, height))
+      const particleCount = Math.round(
+        (width * height) / 15000 * density * config.densityScale * densityScale * (subdued ? 0.78 : 1),
+      )
+      particlesRef.current = Array.from(
+        { length: Math.max(minParticles, Math.min(maxParticles, particleCount)) },
+        () => new Particle(width, height),
+      )
     }
 
-    const render = () => {
+    const stop = () => {
+      if (animationRef.current !== null) {
+        window.cancelAnimationFrame(animationRef.current)
+        animationRef.current = null
+      }
+    }
+
+    const render = (timestamp: number) => {
       if (!visibleRef.current) {
+        return
+      }
+
+      if (timestamp - lastFrameRef.current < frameInterval) {
         animationRef.current = window.requestAnimationFrame(render)
         return
       }
+
+      lastFrameRef.current = timestamp
 
       const width = canvas.clientWidth
       const height = canvas.clientHeight
       ctx.clearRect(0, 0, width, height)
 
       for (const particle of particlesRef.current) {
-        particle.update(width, height, pointerRef.current, interactive ? config.pointerForce * (subdued ? 0.72 : 1) : 0)
+        particle.update(
+          width,
+          height,
+          pointerRef.current,
+          pointerEnabledRef.current ? config.pointerForce * (subdued ? 0.72 : 1) : 0,
+        )
         particle.draw(ctx, config.particleRgb, config.particleAlpha * (subdued ? 0.62 : 1))
       }
 
       animationRef.current = window.requestAnimationFrame(render)
     }
 
+    const start = () => {
+      if (animationRef.current === null) {
+        animationRef.current = window.requestAnimationFrame(render)
+      }
+    }
+
     const handleVisibility = () => {
       visibleRef.current = document.visibilityState !== 'hidden'
+      if (!visibleRef.current) {
+        stop()
+        return
+      }
+
+      lastFrameRef.current = 0
+      start()
     }
 
     resize()
-    render()
+    if (prefersReducedMotion) {
+      ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight)
+      return
+    }
+
+    start()
 
     window.addEventListener('resize', resize)
     document.addEventListener('visibilitychange', handleVisibility)
@@ -156,13 +209,15 @@ export function ParticleCanvas({
     return () => {
       window.removeEventListener('resize', resize)
       document.removeEventListener('visibilitychange', handleVisibility)
-      if (animationRef.current !== null) {
-        window.cancelAnimationFrame(animationRef.current)
-      }
+      stop()
     }
   }, [config, density, interactive, subdued])
 
   const handlePointerMove = (event: ReactPointerEvent<HTMLCanvasElement>) => {
+    if (!pointerEnabledRef.current) {
+      return
+    }
+
     const rect = event.currentTarget.getBoundingClientRect()
     pointerRef.current = {
       x: event.clientX - rect.left,

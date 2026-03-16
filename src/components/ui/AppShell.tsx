@@ -1,13 +1,8 @@
-import { Suspense, lazy, type ReactNode, useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
 import styles from './ui.module.scss'
+import { ParticleCanvas } from './ParticleCanvas'
 import { TopNav, type NavItem } from './TopNav'
 import { ThemeToggle } from './ThemeToggle'
-
-const PARTICLE_CANVAS_DELAY_MS = 120
-const ParticleCanvas = lazy(async () => {
-  const module = await import('./ParticleCanvas')
-  return { default: module.ParticleCanvas }
-})
 
 export function AppShell({
   navItems = [],
@@ -22,26 +17,10 @@ export function AppShell({
   actions?: ReactNode
   children: ReactNode
 }) {
-  const [showParticles, setShowParticles] = useState(false)
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      setShowParticles(true)
-    }, PARTICLE_CANVAS_DELAY_MS)
-
-    return () => {
-      window.clearTimeout(timer)
-    }
-  }, [])
-
   return (
     <div className={styles.shell}>
       <div className={styles.background}>
-        {showParticles ? (
-          <Suspense fallback={null}>
-            <ParticleCanvas density={1} interactive={!subduedParticles} subdued={subduedParticles} />
-          </Suspense>
-        ) : null}
+        <ParticleCanvas density={1} interactive={!subduedParticles} subdued={subduedParticles} />
       </div>
       <div className={styles.content}>
         {showNav ? <TopNav items={navItems} actions={actions} /> : (

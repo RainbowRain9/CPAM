@@ -4,6 +4,8 @@ type IconName =
   | 'theme'
   | 'back'
   | 'plus'
+  | 'download'
+  | 'upload'
   | 'refresh'
   | 'check'
   | 'trash'
@@ -20,6 +22,8 @@ const paths: Record<IconName, string[]> = {
   theme: ['M12 3v1m0 16v1m8-9h1M3 12H2m15.364 6.364.707.707M5.929 5.929l-.707-.707m12.142 0-.707.707M5.929 18.071l-.707.707', 'M15 12a3 3 0 11-6 0 3 3 0 016 0z'],
   back: ['M10 19l-7-7m0 0 7-7m-7 7h18'],
   plus: ['M12 4v16m8-8H4'],
+  download: ['M12 3v12m0 0 4-4m-4 4-4-4', 'M5 19h14'],
+  upload: ['M12 21V9m0 0 4 4m-4-4-4 4', 'M5 5h14'],
   refresh: ['M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15'],
   check: ['M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z'],
   trash: ['M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16'],
@@ -40,9 +44,11 @@ export function InlineIcon({
   className?: string
   strokeWidth?: number
 }) {
+  const iconPaths = paths[name] ?? paths.spark
+
   return (
     <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-      {paths[name].map((path, index) => (
+      {iconPaths.map((path, index) => (
         <path key={`${name}-${index}`} strokeLinecap="round" strokeLinejoin="round" strokeWidth={strokeWidth} d={path} />
       ))}
     </svg>

@@ -15,14 +15,15 @@ vi.mock('./TopNav', () => ({
 }))
 
 describe('AppShell', () => {
-  it('defers particle canvas mounting until after the initial paint', async () => {
+  it('renders the shared shell content and particle background', () => {
     render(
       <AppShell showNav={false}>
         <div>content</div>
       </AppShell>,
     )
 
-    expect(screen.queryByTestId('particle-canvas')).not.toBeInTheDocument()
-    expect(await screen.findByTestId('particle-canvas')).toBeInTheDocument()
+    expect(screen.getByTestId('particle-canvas')).toBeInTheDocument()
+    expect(screen.getByTestId('theme-toggle')).toBeInTheDocument()
+    expect(screen.getByText('content')).toBeInTheDocument()
   })
 })

@@ -114,6 +114,7 @@ function createUsageDb(options = {}) {
       model TEXT PRIMARY KEY,
       input_price REAL DEFAULT 0,
       output_price REAL DEFAULT 0,
+      cache_price REAL,
       updated_at TEXT DEFAULT (datetime('now'))
     );
 
@@ -166,6 +167,7 @@ function createUsageDb(options = {}) {
   addColumnIfMissing(db, 'usage_records', 'cached_tokens', 'INTEGER DEFAULT 0');
   addColumnIfMissing(db, 'usage_records', 'reasoning_tokens', 'INTEGER DEFAULT 0');
   addColumnIfMissing(db, 'usage_records', 'instance_id', 'INTEGER');
+  addColumnIfMissing(db, 'model_pricing', 'cache_price', 'REAL');
 
   db.exec(`
     CREATE INDEX IF NOT EXISTS idx_usage_instance ON usage_records(instance_id);
@@ -203,9 +205,10 @@ function createUsageDb(options = {}) {
     `),
 
     getModelPricing: db.prepare('SELECT * FROM model_pricing'),
+    clearModelPricing: db.prepare('DELETE FROM model_pricing'),
     upsertModelPricing: db.prepare(`
-      INSERT OR REPLACE INTO model_pricing (model, input_price, output_price, updated_at)
-      VALUES (?, ?, ?, datetime('now'))
+      INSERT OR REPLACE INTO model_pricing (model, input_price, output_price, cache_price, updated_at)
+      VALUES (?, ?, ?, ?, datetime('now'))
     `),
     deleteModelPricing: db.prepare('DELETE FROM model_pricing WHERE model = ?'),
 
@@ -505,6 +508,19 @@ function createUsageDb(options = {}) {
     }
   });
 
+  const replaceModelPricingTx = db.transaction((pricingMap) => {
+    stmts.clearModelPricing.run();
+
+    for (const [model, pricing] of Object.entries(pricingMap || {})) {
+      stmts.upsertModelPricing.run(
+        model,
+        pricing.promptPrice,
+        pricing.completionPrice,
+        pricing.cachePrice
+      );
+    }
+  });
+
   function buildUsageWhereClause(instanceId) {
     if (instanceId === undefined || instanceId === null || instanceId === '') {
       return { clause: '', params: [] };
@@ -779,14 +795,21 @@ function createUsageDb(options = {}) {
     getModelPricing() {
       const rows = stmts.getModelPricing.all();
       return Object.fromEntries(rows.map((row) => [row.model, {
-        inputPrice: row.input_price,
-        outputPrice: row.output_price,
+        promptPrice: row.input_price,
+        completionPrice: row.output_price,
+        cachePrice: row.cache_price === null || row.cache_price === undefined
+          ? row.input_price
+          : row.cache_price,
         updatedAt: row.updated_at,
       }]));
     },
 
-    upsertModelPricing(model, inputPrice, outputPrice) {
-      stmts.upsertModelPricing.run(model, inputPrice, outputPrice);
+    upsertModelPricing(model, inputPrice, outputPrice, cachePrice = inputPrice) {
+      stmts.upsertModelPricing.run(model, inputPrice, outputPrice, cachePrice);
+    },
+
+    replaceModelPricing(pricingMap) {
+      replaceModelPricingTx(pricingMap);
     },
 
     deleteModelPricing(model) {

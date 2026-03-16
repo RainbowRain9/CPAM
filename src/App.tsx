@@ -14,9 +14,9 @@ import { useI18n } from './i18n/useI18n'
 import { MODEL_PRICING_PRESETS } from './modelPricingPresets'
 import {
   loadLocalModelPricingState,
-  mergeModelPricingMaps,
   migrateServerPricing,
   persistLocalModelPricingState,
+  type ModelPricingMap,
 } from './modelPricingState'
 import {
   buildScopedCacheKey,
@@ -214,6 +214,27 @@ function getTotalTokens(tokens = {}) {
   if (total > 0) return total
   return getInputTokens(tokens) + getOutputTokens(tokens) + getCachedTokens(tokens) + getReasoningTokens(tokens)
 }
+
+function areModelPricingMapsEqual(left: ModelPricingMap, right: ModelPricingMap) {
+  const leftEntries = Object.entries(left)
+  const rightEntries = Object.entries(right)
+
+  if (leftEntries.length !== rightEntries.length) {
+    return false
+  }
+
+  return leftEntries.every(([model, pricing]) => {
+    const target = right[model]
+    if (!target) return false
+
+    return (
+      pricing.promptPrice === target.promptPrice &&
+      pricing.completionPrice === target.completionPrice &&
+      pricing.cachePrice === target.cachePrice
+    )
+  })
+}
+
 const INITIAL_LOCAL_MODEL_PRICING_STATE = loadLocalModelPricingState()
 
 function calculateAggregateCost(modelName, inputTokens, outputTokens, cachedTokens, pricingMap) {
@@ -818,7 +839,7 @@ function OverviewCard({ title, value, meta = null, valueClassName = 'text-[#0d0d
 }
 
 function App() {
-  const pricingSeededRef = useRef(INITIAL_LOCAL_MODEL_PRICING_STATE.hasStoredPricing)
+  const pricingMigrationAttemptedRef = useRef(false)
   const { t } = useI18n()
   const { resolvedTheme } = useTheme()
 
@@ -836,6 +857,8 @@ function App() {
   const [promptPrice, setPromptPrice] = useState('')
   const [completionPrice, setCompletionPrice] = useState('')
   const [cachePrice, setCachePrice] = useState('')
+  const [pricingSyncing, setPricingSyncing] = useState(false)
+  const [pricingError, setPricingError] = useState('')
   const [requestChartMode, setRequestChartMode] = useState('hourly')
   const [tokenChartMode, setTokenChartMode] = useState('hourly')
   const [modelSortBy, setModelSortBy] = useState('tokens')
@@ -896,6 +919,58 @@ function App() {
     return getActiveCpaInstance(nextInstances)?.id || nextInstances[0]?.id || null
   }
 
+  const applyAuthoritativePricing = (nextPricing: ModelPricingMap) => {
+    const normalizedPricing = migrateServerPricing(nextPricing)
+
+    setModelPricing((currentPricing) => (
+      areModelPricingMapsEqual(currentPricing, normalizedPricing)
+        ? currentPricing
+        : normalizedPricing
+    ))
+    setRemovedPresetModels((currentModels) => (currentModels.length === 0 ? currentModels : []))
+    setPresetOptIn(false)
+
+    return normalizedPricing
+  }
+
+  const persistPricingMap = async (
+    nextPricing: ModelPricingMap,
+    options: { silent?: boolean } = {},
+  ) => {
+    const normalizedPricing = migrateServerPricing(nextPricing)
+
+    if (!options.silent) {
+      setPricingError('')
+    }
+
+    setPricingSyncing(true)
+
+    try {
+      const res = await apiFetch('/api/pricing', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          pricing: normalizedPricing,
+        }),
+      })
+      const data = await res.json().catch(() => ({}))
+
+      if (!res.ok) {
+        throw new Error(data.error || '保存模型价格失败')
+      }
+
+      const persistedPricing = applyAuthoritativePricing(data.pricing || {})
+      return persistedPricing
+    } catch (error) {
+      if (!options.silent) {
+        setPricingError((error as Error).message || '保存模型价格失败')
+      }
+      throw error
+    } finally {
+      setPricingSyncing(false)
+    }
+  }
+
   const fetchUsage = async (nextScope: 'instance' | 'all' = usageScope, requestedInstanceId: number | '' = selectedInstanceId) => {
     try {
       const nextInstances = await fetchCpaInstances()
@@ -924,12 +999,24 @@ function App() {
         setKeyProviderCache(data.keyProviderCache || {})
         setViewInstanceName(data.instanceName || '')
 
-        if (!pricingSeededRef.current) {
-          const migratedPricing = migrateServerPricing(data.modelPricing || {})
-          if (Object.keys(migratedPricing).length > 0) {
-            setModelPricing((currentPricing) => mergeModelPricingMaps(currentPricing, migratedPricing))
-            pricingSeededRef.current = true
+        const serverPricing = migrateServerPricing(data.modelPricing || {})
+
+        if (Object.keys(serverPricing).length > 0) {
+          pricingMigrationAttemptedRef.current = true
+          applyAuthoritativePricing(serverPricing)
+        } else if (
+          !pricingMigrationAttemptedRef.current &&
+          INITIAL_LOCAL_MODEL_PRICING_STATE.hasStoredPricing
+        ) {
+          pricingMigrationAttemptedRef.current = true
+
+          try {
+            await persistPricingMap(INITIAL_LOCAL_MODEL_PRICING_STATE.pricing, { silent: true })
+          } catch (error) {
+            console.error('迁移本地模型价格失败:', error)
           }
+        } else {
+          applyAuthoritativePricing({})
         }
       }
     } catch (e) {
@@ -1019,10 +1106,9 @@ function App() {
     setCachePrice('')
   }
 
-  const handleSavePricing = () => {
+  const handleSavePricing = async () => {
     if (!selectedModel) return
 
-    pricingSeededRef.current = true
     const nextPricing = {
       ...modelPricing,
       [selectedModel]: {
@@ -1034,29 +1120,33 @@ function App() {
       },
     }
 
-    setModelPricing(nextPricing)
-    setRemovedPresetModels((prev) => prev.filter((model) => model !== selectedModel))
+    await persistPricingMap(nextPricing)
+
+    setRemovedPresetModels([])
     setSelectedModel('')
     setPromptPrice('')
     setCompletionPrice('')
     setCachePrice('')
   }
 
-  const handleDeletePricing = (model) => {
-    pricingSeededRef.current = true
+  const handleDeletePricing = async (model) => {
     const nextPricing = { ...modelPricing }
     delete nextPricing[model]
-    setModelPricing(nextPricing)
 
-    if (MODEL_PRICING_PRESETS[model]) {
-      setRemovedPresetModels((prev) => Array.from(new Set([...prev, model])).sort())
+    await persistPricingMap(nextPricing)
+
+    if (selectedModel === model) {
+      setSelectedModel('')
+      setPromptPrice('')
+      setCompletionPrice('')
+      setCachePrice('')
     }
   }
 
-  const handleClearAllPricing = () => {
-    pricingSeededRef.current = true
-    setModelPricing({})
-    setRemovedPresetModels(Object.keys(MODEL_PRICING_PRESETS))
+  const handleClearAllPricing = async () => {
+    await persistPricingMap({})
+
+    setRemovedPresetModels([])
     setPresetOptIn(false)
     setSelectedModel('')
     setPromptPrice('')
@@ -1232,7 +1322,7 @@ function App() {
                 value={hasAnyPricing ? formatUsd(overviewStats.totalCost) : '--'}
                 meta={
                   hasAnyPricing
-                    ? <p>按当前浏览器保存的模型价格估算</p>
+                    ? <p>按服务器保存的模型价格估算</p>
                     : <p>设置模型价格后可显示费用</p>
                 }
               />
@@ -1870,9 +1960,13 @@ function App() {
                 <div className="flex flex-col gap-2 mb-6">
                   <h3 className="text-base font-semibold text-[#0d0d0d]">模型价格</h3>
                   <p className="text-sm text-[#6e6e80]">
-                    价格仅保存在当前浏览器，用于费用估算，不会写回服务器配置。
+                    价格保存在服务器数据库中，浏览器只保留同步副本，用于费用估算。
                   </p>
                 </div>
+
+                {pricingError ? (
+                  <p className="mb-4 text-sm text-[var(--danger)]">{pricingError}</p>
+                ) : null}
 
                 <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_140px_140px_140px_auto] items-end mb-8">
                   <div>
@@ -1924,11 +2018,11 @@ function App() {
                     />
                   </div>
                   <button
-                    onClick={handleSavePricing}
-                    disabled={!selectedModel}
+                    onClick={() => void handleSavePricing()}
+                    disabled={pricingSyncing || !selectedModel}
                     className="px-4 py-2 bg-[#0d0d0d] text-white text-sm font-medium rounded-lg hover:bg-[#2d2d2d] disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
                   >
-                    保存
+                    {pricingSyncing ? '保存中...' : '保存'}
                   </button>
                 </div>
 
@@ -1936,7 +2030,8 @@ function App() {
                   <h4 className="text-sm font-medium text-[#0d0d0d]">已保存的模型价格</h4>
                   {Object.keys(modelPricing).length > 0 && (
                     <button
-                      onClick={handleClearAllPricing}
+                      onClick={() => void handleClearAllPricing()}
+                      disabled={pricingSyncing}
                       className="text-xs text-[#ef4444] hover:text-[#dc2626] transition-colors"
                     >
                       清空全部
@@ -1961,12 +2056,14 @@ function App() {
                         <div className="flex flex-col gap-2">
                           <button
                             onClick={() => handleSelectPricingModel(model)}
+                            disabled={pricingSyncing}
                             className="px-3 py-1.5 text-xs font-medium border border-[#e5e5e5] rounded-md text-[#6e6e80] hover:text-[#0d0d0d] hover:border-[#0d0d0d] transition-colors"
                           >
                             编辑
                           </button>
                           <button
-                            onClick={() => handleDeletePricing(model)}
+                            onClick={() => void handleDeletePricing(model)}
+                            disabled={pricingSyncing}
                             className="px-3 py-1.5 text-xs font-medium border border-[#fecaca] rounded-md text-[#ef4444] hover:text-[#dc2626] hover:border-[#fca5a5] transition-colors"
                           >
                             删除

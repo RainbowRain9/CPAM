@@ -33,6 +33,53 @@ function deriveDefaultInstanceName(baseUrl, index = 1) {
   }
 }
 
+function toSafeNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function toNonNegativeNumber(value) {
+  return Math.max(0, toSafeNumber(value));
+}
+
+function normalizeModelPricingMap(rawPricing) {
+  if (!rawPricing || typeof rawPricing !== 'object' || Array.isArray(rawPricing)) {
+    return null;
+  }
+
+  const normalized = {};
+
+  Object.entries(rawPricing).forEach(([model, value]) => {
+    const normalizedModel = String(model || '').trim();
+    if (!normalizedModel || !value || typeof value !== 'object' || Array.isArray(value)) {
+      return;
+    }
+
+    const pricing = value;
+    const promptPrice = toNonNegativeNumber(
+      pricing.promptPrice ?? pricing.prompt ?? pricing.inputPrice
+    );
+    const completionPrice = toNonNegativeNumber(
+      pricing.completionPrice ?? pricing.completion ?? pricing.outputPrice
+    );
+    const hasExplicitCachePrice =
+      pricing.cachePrice !== undefined ||
+      pricing.cache !== undefined ||
+      pricing.cacheInputPrice !== undefined;
+    const cachePrice = hasExplicitCachePrice
+      ? toNonNegativeNumber(pricing.cachePrice ?? pricing.cache ?? pricing.cacheInputPrice)
+      : promptPrice;
+
+    normalized[normalizedModel] = {
+      promptPrice,
+      completionPrice,
+      cachePrice,
+    };
+  });
+
+  return normalized;
+}
+
 function serializeCpaInstance(instance) {
   if (!instance) return null;
 
@@ -760,13 +807,45 @@ function createServerApp(options = {}) {
     res.json(usageDb.getModelPricing());
   });
 
+  app.put('/api/pricing', (req, res) => {
+    const pricing = normalizeModelPricingMap(req.body?.pricing);
+    if (pricing === null) {
+      return res.status(400).json({ error: 'pricing 必须是对象' });
+    }
+
+    usageDb.replaceModelPricing(pricing);
+    res.json({
+      success: true,
+      pricing: usageDb.getModelPricing(),
+    });
+  });
+
   app.post('/api/pricing', (req, res) => {
-    const { model, inputPrice, outputPrice } = req.body || {};
-    if (!model) {
+    const modelName = String(req.body?.model || '').trim();
+    if (!modelName) {
       return res.status(400).json({ error: '模型名称不能为空' });
     }
 
-    usageDb.upsertModelPricing(model, parseFloat(inputPrice) || 0, parseFloat(outputPrice) || 0);
+    const pricing = normalizeModelPricingMap({
+      [modelName]: {
+        promptPrice: req.body?.inputPrice,
+        completionPrice: req.body?.outputPrice,
+        cachePrice: req.body?.cachePrice,
+      },
+    });
+
+    const nextPricing = pricing?.[modelName] || {
+      promptPrice: 0,
+      completionPrice: 0,
+      cachePrice: 0,
+    };
+
+    usageDb.upsertModelPricing(
+      modelName,
+      nextPricing.promptPrice,
+      nextPricing.completionPrice,
+      nextPricing.cachePrice
+    );
     res.json({
       success: true,
       pricing: usageDb.getModelPricing(),

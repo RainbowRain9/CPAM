@@ -496,4 +496,180 @@ describe('server app multi-instance routes', () => {
       email: 'legacy@example.com',
     })
   })
+
+  it('migrates legacy model pricing rows without cache_price and falls back cachePrice to promptPrice', async () => {
+    const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cpam-app-legacy-pricing-'))
+    tempDirs.push(dataDir)
+
+    const legacyDb = new SqliteDatabase(path.join(dataDir, 'usage.db'))
+    legacyDb.exec(`
+      CREATE TABLE model_pricing (
+        model TEXT PRIMARY KEY,
+        input_price REAL DEFAULT 0,
+        output_price REAL DEFAULT 0,
+        updated_at TEXT DEFAULT (datetime('now'))
+      );
+    `)
+    legacyDb.prepare(`
+      INSERT INTO model_pricing (model, input_price, output_price, updated_at)
+      VALUES (?, ?, ?, ?)
+    `).run('gpt-legacy', 1.5, 5, '2026-03-14T00:00:00.000Z')
+    legacyDb.close()
+
+    const usageDb = createUsageDb({ dataDir })
+    databases.push(usageDb)
+
+    const columns = usageDb.db.prepare('PRAGMA table_info(model_pricing)').all()
+    expect(columns.some((column: { name: string }) => column.name === 'cache_price')).toBe(true)
+    expect(usageDb.getModelPricing()).toEqual({
+      'gpt-legacy': {
+        promptPrice: 1.5,
+        completionPrice: 5,
+        cachePrice: 1.5,
+        updatedAt: '2026-03-14T00:00:00.000Z',
+      },
+    })
+  })
+
+  it('stores complete pricing maps via PUT and returns them from pricing and usage routes', async () => {
+    const fetchImpl = createCliProxyFetchMock()
+    const { baseUrl } = await startApp(fetchImpl as unknown as typeof fetch)
+    const cookie = await bootstrapCookie(baseUrl)
+
+    const createInstanceResponse = await apiRequest(baseUrl, cookie, '/api/cpa-instances', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Primary',
+        baseUrl: 'http://instance-a:8317',
+        apiKey: 'good-a',
+        syncInterval: 5,
+        isEnabled: true,
+      }),
+    })
+    expect(createInstanceResponse.status).toBe(201)
+
+    const replaceResponse = await apiRequest(baseUrl, cookie, '/api/pricing', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pricing: {
+          'gpt-5.4': {
+            promptPrice: 1.25,
+            completionPrice: 10,
+            cachePrice: 0.125,
+          },
+          'claude-sonnet-4-6': {
+            promptPrice: 3,
+            completionPrice: 15,
+            cachePrice: 0.75,
+          },
+        },
+      }),
+    })
+    expect(replaceResponse.status).toBe(200)
+
+    const replacePayload = await replaceResponse.json()
+    expect(replacePayload.pricing).toEqual({
+      'gpt-5.4': {
+        promptPrice: 1.25,
+        completionPrice: 10,
+        cachePrice: 0.125,
+        updatedAt: expect.any(String),
+      },
+      'claude-sonnet-4-6': {
+        promptPrice: 3,
+        completionPrice: 15,
+        cachePrice: 0.75,
+        updatedAt: expect.any(String),
+      },
+    })
+
+    const pricingResponse = await apiRequest(baseUrl, cookie, '/api/pricing')
+    const pricingPayload = await pricingResponse.json()
+    expect(pricingPayload).toEqual(replacePayload.pricing)
+
+    const usageResponse = await apiRequest(baseUrl, cookie, '/api/usage')
+    const usagePayload = await usageResponse.json()
+    expect(usagePayload.modelPricing).toEqual(replacePayload.pricing)
+  })
+
+  it('clears pricing maps via PUT empty objects and preserves POST/DELETE compatibility', async () => {
+    const fetchImpl = createCliProxyFetchMock()
+    const { baseUrl } = await startApp(fetchImpl as unknown as typeof fetch)
+    const cookie = await bootstrapCookie(baseUrl)
+
+    const createInstanceResponse = await apiRequest(baseUrl, cookie, '/api/cpa-instances', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Primary',
+        baseUrl: 'http://instance-a:8317',
+        apiKey: 'good-a',
+        syncInterval: 5,
+        isEnabled: true,
+      }),
+    })
+    expect(createInstanceResponse.status).toBe(201)
+
+    const postResponse = await apiRequest(baseUrl, cookie, '/api/pricing', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-compat',
+        inputPrice: 2,
+        outputPrice: 8,
+        cachePrice: 0.5,
+      }),
+    })
+    expect(postResponse.status).toBe(200)
+
+    const postPayload = await postResponse.json()
+    expect(postPayload.pricing['gpt-compat']).toEqual({
+      promptPrice: 2,
+      completionPrice: 8,
+      cachePrice: 0.5,
+      updatedAt: expect.any(String),
+    })
+
+    const deleteResponse = await apiRequest(baseUrl, cookie, '/api/pricing/gpt-compat', {
+      method: 'DELETE',
+    })
+    expect(deleteResponse.status).toBe(200)
+
+    const pricingAfterDeleteResponse = await apiRequest(baseUrl, cookie, '/api/pricing')
+    const pricingAfterDelete = await pricingAfterDeleteResponse.json()
+    expect(pricingAfterDelete).toEqual({})
+
+    const seedResponse = await apiRequest(baseUrl, cookie, '/api/pricing', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pricing: {
+          'gpt-temp': {
+            promptPrice: 4,
+            completionPrice: 12,
+            cachePrice: 1,
+          },
+        },
+      }),
+    })
+    expect(seedResponse.status).toBe(200)
+
+    const clearResponse = await apiRequest(baseUrl, cookie, '/api/pricing', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        pricing: {},
+      }),
+    })
+    expect(clearResponse.status).toBe(200)
+
+    const clearPayload = await clearResponse.json()
+    expect(clearPayload.pricing).toEqual({})
+
+    const usageAfterClearResponse = await apiRequest(baseUrl, cookie, '/api/usage')
+    const usageAfterClear = await usageAfterClearResponse.json()
+    expect(usageAfterClear.modelPricing).toEqual({})
+  })
 })
